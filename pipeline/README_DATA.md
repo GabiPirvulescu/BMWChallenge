@@ -16,7 +16,7 @@ Choose the raw and processed directories explicitly. The processed destination m
 python pipeline/00_preprocess.py --raw-data-dir "<your raw source directory>" --output-dir "<your processed output directory>"
 ```
 
-The converter requires at least one feedback workbook, survey workbook, sales workbook, and PDF. It prints the manifest status and returns a nonzero exit code for failed or incomplete conversions. Add `--check-known-feedback-counts` when validating the complete three-model export against the documented source-row and distinct-comment targets.
+The converter requires at least one feedback workbook, survey workbook, sales workbook, option-catalog PDF, and corporate-report PDF. It prints the manifest status and returns a nonzero exit code for failed or incomplete conversions. Use repeated `--required-document-kind` flags to specify a different reviewed document set. Add `--check-known-feedback-counts` when validating the complete three-model export against the documented source-row and distinct-comment targets.
 
 Set `NEO4J_URI`, `NEO4J_USER`, and `NEO4J_PASSWORD`, then load a successful bundle:
 
@@ -43,16 +43,31 @@ The scripts require a reachable Neo4j instance. They do not start Neo4j or fabri
 
 ## Input recognition and intermediate format
 
-- `.xlsx` and `.xlsm` are supported through `openpyxl`; `.pdf` is supported through `pypdf`.
+- `.xlsx` and `.xlsm` are supported through `openpyxl`; `.pdf` is supported through `pypdf`. Excel's transient `~$` lock files are excluded from source discovery.
 - Feedback workbook names should include `feedback`, `explorer`, or `hackathon`. The parser finds a sheet/header containing both an original feedback ID and text. It resolves fields by header names and preserves every nonempty source row plus its sheet/row locator.
-- Survey workbook names should include `study`, `studies`, `survey`, or `customer`. All numeric cells are preserved as native facts. An explicit seven-column `1..7` header is represented as a distribution with respondent N and scale left unknown unless the source says otherwise.
+- Survey workbook names should include `study`, `studies`, `survey`, or `customer`. All numeric cells are preserved as native facts with per-column model/market scope. Explicit `1..7` categories and seven-row percentage blocks are also represented as native distributions with exact cell locators; the sample base is not treated as respondent N, and topic mappings remain unreviewed until explicitly approved.
 - Sales workbook names should include `sales`, `volume`, or `forecast`. A sales fact is emitted only when vehicle line, region, year, and source value are identifiable. Zero is retained; missing values are not converted to zero. `G60_G68` remains one sales line and no powertrain split is synthesized.
-- Every PDF page is recorded, including empty/unextractable pages. Text chunks stay within their physical page, preserve exact extracted text spans, and cite 1-based physical pages. Printed page labels remain null unless later supplied from a reviewed source.
+- Every PDF page is recorded, including empty/unextractable pages. Text chunks stay within their physical page, preserve exact extracted text spans, and cite 1-based physical pages. Printed page labels remain null unless later supplied from a reviewed source. Required document subtypes default to option catalogs and corporate reports so a catalog-only input set is reported as partial.
 - Other workbook layouts remain available in `source_records.jsonl`; unmatched numeric cells are not silently promoted to scoped business facts.
 
 The output has `source_files.jsonl`, `source_records.jsonl`, `feedback_comments.jsonl`, `feedback_annotations.jsonl`, `facts.jsonl`, `document_chunks.jsonl`, and `manifest.json`. IDs are derived from source-file SHA-256 and source locators/business IDs. A repeated feedback ID with conflicting text or scope is flagged and kept as separate row-backed comments. Multiple annotations on a consistent comment stay separate. `BEVE` is normalized to `BEV` while its original value remains stored. A missing label stays missing.
 
 The manifest records converted source hashes, parser counts, per-file failures, missing required kinds, known feedback count checks, and overall `succeeded`/`partial`/`failed` state. A missing or unreadable required input cannot appear as an empty successful conversion.
+
+## Validation
+
+Run the synthetic parser/provider checks and, when the private `BMW-Data` folder
+is present at the repository root, the real-corpus count and citation checks:
+
+```powershell
+python -m unittest discover -s tests/data -v
+```
+
+The real-corpus test checks the documented per-model feedback counts, source
+discovery, sales facts, and that every PDF chunk is an exact substring of its
+page record. It skips when the private source directory is absent. To produce
+an inspectable bundle and manifest, run `00_preprocess.py` with explicit raw
+and output directories as shown above.
 
 ## Neo4j entities and evidence queries
 

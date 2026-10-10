@@ -18,10 +18,11 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-CONVERSION_VERSION = "1.0.0"
+CONVERSION_VERSION = "1.1.0"
 SUPPORTED_EXCEL = {".xlsx", ".xlsm"}
 SUPPORTED_PDF = {".pdf"}
 DEFAULT_REQUIRED_KINDS = ("feedback", "survey", "sales", "document")
+DEFAULT_REQUIRED_DOCUMENT_KINDS = ("option_catalog", "corporate_report")
 
 
 @dataclass
@@ -292,8 +293,13 @@ def convert_feedback_workbook(path: Path, source: Mapping[str, Any] | None = Non
         header_record["record_kind"] = "table_header"
         bundle.source_records.append(header_record)
         staged: list[dict[str, Any]] = []
-        for row_num in range(header_row + 1, sheet.max_row + 1):
-            cells = [cell.value for cell in sheet[row_num]]
+        # Read-only worksheets are forward-only XML streams. Repeated
+        # ``sheet[row_num]`` lookups restart that stream for every row and
+        # make large exports effectively quadratic. Consume the data once.
+        data_rows = sheet.iter_rows(min_row=header_row + 1, max_row=sheet.max_row,
+                                    values_only=True)
+        for row_num, values in enumerate(data_rows, start=header_row + 1):
+            cells = list(values)
             if not _nonempty(cells):
                 continue
             record = _row_source_record(source, sheet.title, row_num, headers, cells)
@@ -392,7 +398,11 @@ def convert_feedback_workbook(path: Path, source: Mapping[str, Any] | None = Non
                     "canonicalization": "source_version_plus_original_id" if business_id and business_id not in conflicts else "source_row_fallback",
                 })
                 emitted_comments.add(comment_id)
-            if fields["text_quality"] == "low_information_candidate":
+            comment_text_quality = _text_quality(fields["text"])
+            # ``text_quality`` belongs to the emitted comment payload, not to
+            # the parsed workbook fields. Keep the warning test based on the
+            # same computed value without requiring a nonexistent field.
+            if comment_text_quality == "low_information_candidate":
                 bundle.issues.append({
                     "severity": "warning",
                     "code": "low_information_text_candidate",
@@ -475,7 +485,9 @@ def _numeric(value: Any) -> int | float | None:
 
 def _year(value: Any) -> int | None:
     text = str(value or "").strip()
-    match = re.search(r"\b(20(?:24|25|30))\b", text)
+    # Underscores count as word characters, so ``volume_2030`` does not have
+    # a ``\b`` before the year. Treat non-digits as valid delimiters.
+    match = re.search(r"(?<!\d)(20(?:24|25|30))(?!\d)", text)
     return int(match.group(1)) if match else None
 
 
@@ -513,11 +525,43 @@ def _scope_from_text(values: Iterable[Any]) -> tuple[str | None, str | None]:
     return model, region
 
 
+def _survey_column_scope(row: Mapping[str, Any], column_index: int) -> tuple[str | None, str | None]:
+    """Resolve model/market from this column's headings, including merged cells."""
+    header_values = row.get("header_values", [])
+    column_header = header_values[column_index] if column_index < len(header_values) else None
+    model = _line(column_header)
+    model_headers = {candidate for value in header_values if (candidate := _line(value))}
+    fallback_model, fallback_region = _scope_from_text([row.get("sheet")])
+    if model is None and len(model_headers) <= 1:
+        model = fallback_model or next(iter(model_headers), None)
+
+    region = None
+    for context_row in row.get("record", {}).get("raw_payload", {}).get("header_context", []):
+        values = context_row.get("values", [])
+        nearest_region = None
+        # Merged spreadsheet headings leave continuation cells blank. Carry a
+        # region label across those columns, stopping at the next explicit one.
+        for index in range(min(column_index + 1, len(values))):
+            candidate = _region(values[index])
+            if candidate:
+                nearest_region = candidate
+        if nearest_region:
+            region = nearest_region
+    if region is None:
+        region = fallback_region
+    return model, region
+
+
 def _headers_and_records(path: Path, source: Mapping[str, Any], bundle: ConversionBundle) -> list[dict[str, Any]]:
-    wb = _excel_module().load_workbook(path, read_only=True, data_only=False)
+    openpyxl = _excel_module()
+    # Keep formula text in the source record while also reading Excel's cached
+    # result for numeric facts. openpyxl does not calculate formulas itself.
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    cached_wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     rows: list[dict[str, Any]] = []
     try:
-        for sheet in wb.worksheets:
+        for sheet_index, sheet in enumerate(wb.worksheets):
+            cached_sheet = cached_wb.worksheets[sheet_index]
             width = sheet.max_column
             # A title/merged heading often precedes the table. Prefer the
             # densest of the first 20 populated rows, while retaining every
@@ -534,6 +578,11 @@ def _headers_and_records(path: Path, source: Mapping[str, Any], bundle: Conversi
                     normalized = normalize_header(value)
                     if any(normalized in aliases for aliases in HEADER_ALIASES.values()):
                         score += 4
+                    # Product/derivative headings are the column schema in
+                    # BMW's wide study sheets, even when no literal "model"
+                    # header exists.
+                    if _line(value):
+                        score += 6
                     if _year(value) is not None or _region(value) is not None:
                         score += 2
                     if normalized in {str(number) for number in range(1, 8)}:
@@ -550,8 +599,18 @@ def _headers_and_records(path: Path, source: Mapping[str, Any], bundle: Conversi
                 {"row": row_num, "values": [json_value(value) for value in values]}
                 for row_num, values in populated if row_num <= header_row
             ]
-            for row_num in range(1, sheet.max_row + 1):
-                cells = [sheet.cell(row=row_num, column=column).value for column in range(1, width + 1)]
+            question_label = (str(header_values[0]).strip()
+                              if header_values and header_values[0] is not None else None)
+            # Iterate the read-only worksheet once instead of calling
+            # ``sheet.cell`` for every cell, which repeatedly scans the XML.
+            formula_rows = sheet.iter_rows(min_row=1, max_row=sheet.max_row,
+                                           min_col=1, max_col=width, values_only=True)
+            cached_rows = cached_sheet.iter_rows(min_row=1, max_row=sheet.max_row,
+                                                 min_col=1, max_col=width, values_only=True)
+            for row_num, (values, cached_values) in enumerate(
+                    zip(formula_rows, cached_rows, strict=True), start=1):
+                cells = list(values)
+                cached_cells = list(cached_values)
                 if not _nonempty(cells):
                     continue
                 source_record = _row_source_record(source, sheet.title, row_num, headers, cells)
@@ -560,11 +619,31 @@ def _headers_and_records(path: Path, source: Mapping[str, Any], bundle: Conversi
                 bundle.source_records.append(source_record)
                 if row_num <= header_row:
                     continue
+                first_value = cells[0] if cells else None
+                has_numeric = any(
+                    _effective_numeric(value, cached_cells[index] if index < len(cached_cells) else None)[0] is not None
+                    for index, value in enumerate(cells)
+                )
+                measure_label = (str(first_value).strip()
+                                 if has_numeric and first_value is not None and str(first_value).strip()
+                                 else None)
+                if not has_numeric and first_value is not None and str(first_value).strip():
+                    question_label = str(first_value).strip()
                 rows.append({"sheet": sheet.title, "row_num": row_num, "headers": headers,
-                             "header_values": header_values, "cells": cells, "record": source_record})
+                             "header_values": header_values, "cells": cells,
+                             "cached_cells": cached_cells, "question_label": question_label,
+                             "measure_label": measure_label, "record": source_record})
     finally:
         wb.close()
+        cached_wb.close()
     return rows
+
+
+def _effective_numeric(raw_value: Any, cached_value: Any) -> tuple[int | float | None, str]:
+    """Return a numeric source value and whether it came from a formula cache."""
+    if isinstance(raw_value, str) and raw_value.startswith("="):
+        return _numeric(cached_value), "cached_formula_result"
+    return _numeric(raw_value), "source_numeric_cell"
 
 
 def _fact(source: Mapping[str, Any], record: Mapping[str, Any], kind: str,
@@ -584,33 +663,43 @@ def _fact(source: Mapping[str, Any], record: Mapping[str, Any], kind: str,
 def _convert_survey_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str, Any], bundle: ConversionBundle) -> None:
     for row in rows:
         headers, cells = row["headers"], row["cells"]
-        row_labels = [value for value in cells if isinstance(value, str) and value.strip()]
-        header_context = row["record"].get("raw_payload", {}).get("header_context", [])
-        context_values = [value for context_row in header_context for value in context_row.get("values", [])]
-        model, region = _scope_from_text([row["sheet"], *row_labels, *row["header_values"], *context_values])
+        cached_cells = row.get("cached_cells", cells)
         respondent_n_value = _numeric(_alias_value(headers, cells, "respondent_n"))
         respondent_n = int(respondent_n_value) if respondent_n_value is not None and respondent_n_value >= 0 else None
         raw_scale = _alias_value(headers, cells, "scale")
         scale = str(raw_scale).strip() if raw_scale is not None and str(raw_scale).strip() else None
         raw_unit = _alias_value(headers, cells, "unit")
+        # Some BMW sheets put a measure label such as "% of column, sample
+        # base" in the second cell rather than a named column.
+        if raw_unit is None and len(cells) > 1 and isinstance(cells[1], str):
+            raw_unit = cells[1]
         unit = str(raw_unit).strip() if raw_unit is not None and str(raw_unit).strip() else None
-        numeric_cells = [(index, _numeric(value)) for index, value in enumerate(cells) if _numeric(value) is not None]
+        question = row.get("question_label")
+        measure_label = row.get("measure_label")
+        numeric_cells = []
+        for index, raw_value in enumerate(cells):
+            cached_value = cached_cells[index] if index < len(cached_cells) else None
+            value, value_provenance = _effective_numeric(raw_value, cached_value)
+            if value is not None:
+                numeric_cells.append((index, value, value_provenance))
         if not numeric_cells:
             continue
         # Preserve every numeric cell as a native fact, including scales and
         # percentages. No cross-scale averaging or respondent-N inference.
-        for index, value in numeric_cells:
+        for index, value, value_provenance in numeric_cells:
             column_header = headers[index] if index < len(headers) else f"column_{index + 1}"
-            label_candidates = [str(v).strip() for v in cells[:index] if isinstance(v, str) and str(v).strip()]
-            metric = " / ".join(label_candidates[-2:] + [str(column_header)])
+            model, region = _survey_column_scope(row, index)
+            metric_parts = [part for part in (question, measure_label) if part]
+            metric = " / ".join(dict.fromkeys(metric_parts)) or str(column_header)
             cell_locator = {**row["record"]["locator"], "column": index + 1,
                             "column_header": column_header}
             bundle.facts.append(_fact(
                 source, row["record"], "survey_cell", cell_locator,
-                metric=metric, value=value, unit=unit, scale=scale,
+                metric=metric, question=question, response_label=measure_label,
+                value=value, unit=unit, scale=scale,
                 derivative=model, region=region, respondent_n=respondent_n,
                 interpretation="native_cell_unmapped", mapping_strength="unmapped",
-                source_value=json_value(cells[index]),
+                source_value=json_value(cells[index]), value_provenance=value_provenance,
             ))
 
         # Recognize a seven-column 1..7 distribution only when those native
@@ -620,7 +709,13 @@ def _convert_survey_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str,
             if str(header).strip() in {"1", "2", "3", "4", "5", "6", "7"}:
                 category_positions.append(index)
         if len(category_positions) == 7 and category_positions == list(range(category_positions[0], category_positions[0] + 7)):
-            values = [_numeric(cells[index]) if index < len(cells) else None for index in category_positions]
+            values = [
+                _effective_numeric(
+                    cells[index] if index < len(cells) else None,
+                    cached_cells[index] if index < len(cached_cells) else None,
+                )[0]
+                for index in category_positions
+            ]
             if all(value is not None for value in values):
                 question_labels = [str(value).strip() for value in cells[:category_positions[0]]
                                    if isinstance(value, str) and str(value).strip()]
@@ -644,10 +739,79 @@ def _convert_survey_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str,
                     note="Seven native categories preserved; total is not interpreted as respondent N.",
                 ))
 
+    _add_native_survey_distributions(rows, source, bundle)
+
+
+def _add_native_survey_distributions(rows: Sequence[Mapping[str, Any]],
+                                     source: Mapping[str, Any], bundle: ConversionBundle) -> None:
+    """Bundle seven source response rows without inventing N or a mapped topic."""
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        category = row.get("measure_label")
+        cells = row["cells"]
+        cached_cells = row.get("cached_cells", cells)
+        if not category or normalize_header(category) in {"sampletotal", "mean"}:
+            continue
+        source_measure = cells[1] if len(cells) > 1 and isinstance(cells[1], str) else ""
+        if "%" not in source_measure and "percent" not in source_measure.casefold():
+            continue
+        for index, raw_value in enumerate(cells):
+            cached_value = cached_cells[index] if index < len(cached_cells) else None
+            value, value_provenance = _effective_numeric(raw_value, cached_value)
+            if value is None:
+                continue
+            model, region = _survey_column_scope(row, index)
+            if not model or not region:
+                continue
+            key = (str(row["sheet"]), str(row.get("question_label") or ""), model, region)
+            grouped.setdefault(key, []).append({
+                "category": str(category), "value": value, "value_provenance": value_provenance,
+                "row": row, "column": index,
+            })
+
+    for (sheet, question, model, region), entries in grouped.items():
+        categories = [entry["category"] for entry in entries]
+        if len(entries) != 7 or len(set(categories)) != 7:
+            continue
+        total = sum(entry["value"] for entry in entries)
+        if not (abs(total - 1.0) <= 0.03 or abs(total - 100.0) <= 3.0):
+            continue
+        ordered = sorted(entries, key=lambda entry: entry["row"]["row_num"])
+        first = ordered[0]
+        locators = []
+        for entry in ordered:
+            entry_row = entry["row"]
+            column_index = entry["column"]
+            column_header = (entry_row["header_values"][column_index]
+                             if column_index < len(entry_row["header_values"]) else None)
+            locators.append({
+                **entry_row["record"]["locator"],
+                "source_record_id": entry_row["record"]["id"],
+                "column": column_index + 1,
+                "column_header": json_value(column_header),
+                "response_category": entry["category"],
+                "value_provenance": entry["value_provenance"],
+            })
+        unit = first["row"]["cells"][1] if len(first["row"]["cells"]) > 1 else None
+        bundle.facts.append(_fact(
+            source, first["row"]["record"], "survey_distribution",
+            {"filename": source["filename"], "sheet": sheet, "question": question, "cells": locators},
+            metric=question, question=question,
+            distribution={entry["category"]: entry["value"] for entry in ordered},
+            distribution_total=total, distribution_kind="native_seven_category",
+            category_labels=[entry["category"] for entry in ordered],
+            respondent_n=None, scale=None, scale_provenance="not_reported",
+            unit=unit, derivative=model, region=region,
+            mapping_strength="unmapped",
+            note="Native seven-category shares; sample base is not interpreted as respondent N.",
+            cell_locators=locators,
+        ))
+
 
 def _convert_sales_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str, Any], bundle: ConversionBundle) -> None:
     for row in rows:
         headers, cells = row["headers"], row["cells"]
+        cached_cells = row.get("cached_cells", cells)
         header_context = row["record"].get("raw_payload", {}).get("header_context", [])
         context_values = [value for context_row in header_context for value in context_row.get("values", [])]
         context = [row["sheet"], source["filename"], *cells, *row["header_values"], *context_values]
@@ -664,7 +828,10 @@ def _convert_sales_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str, 
         if explicit_year is not None and explicit_volume is not None and explicit_region is not None:
             year = _year(explicit_year)
             region = _region(explicit_region)
-            volume = _numeric(explicit_volume)
+            volume_index = next((index for index, header in enumerate(headers)
+                                 if normalize_header(header) in HEADER_ALIASES["volume"]), None)
+            cached_volume = cached_cells[volume_index] if volume_index is not None and volume_index < len(cached_cells) else None
+            volume, value_provenance = _effective_numeric(explicit_volume, cached_volume)
             if year and region and line and volume is not None:
                 bundle.facts.append(_fact(
                     source, row["record"], "sales", row["record"]["locator"],
@@ -672,12 +839,21 @@ def _convert_sales_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str, 
                     volume=volume, unit="vehicles", powertrain=None,
                     powertrain_split="unknown", applicability="whole_line",
                     mapping_version="sales_line_map_v1",
+                    source_value=json_value(explicit_volume), value_provenance=value_provenance,
                 ))
                 continue
 
         # Matrix layout: year/region may be on either the row or column header.
         for index, raw_value in enumerate(cells):
-            volume = _numeric(raw_value)
+            cached_value = cached_cells[index] if index < len(cached_cells) else None
+            volume, value_provenance = _effective_numeric(raw_value, cached_value)
+            if isinstance(raw_value, str) and raw_value.startswith("=") and volume is None:
+                bundle.issues.append({
+                    "severity": "warning", "code": "sales_formula_without_cached_value",
+                    "source_file_id": source["id"], "source_record_id": row["record"]["id"],
+                    "column": index + 1,
+                    "message": "Formula text was preserved, but the workbook has no cached numeric result to use as a sales fact.",
+                })
             if volume is None:
                 continue
             column_label = row["header_values"][index] if index < len(row["header_values"]) else None
@@ -702,6 +878,7 @@ def _convert_sales_rows(rows: Sequence[Mapping[str, Any]], source: Mapping[str, 
                 volume=volume, unit="vehicles", powertrain=None,
                 powertrain_split="unknown", applicability="whole_line",
                 mapping_version="sales_line_map_v1",
+                source_value=json_value(raw_value), value_provenance=value_provenance,
             ))
 
 
@@ -814,6 +991,7 @@ def discover_sources(raw_data_dir: Path) -> list[Path]:
     if not raw_data_dir.exists() or not raw_data_dir.is_dir():
         raise ConversionError(f"Raw data directory does not exist or is not a directory: {raw_data_dir}")
     return sorted((path for path in raw_data_dir.rglob("*") if path.is_file()
+                   and not path.name.startswith("~$")
                    and path.suffix.casefold() in SUPPORTED_EXCEL | SUPPORTED_PDF),
                   key=lambda item: str(item.relative_to(raw_data_dir)).casefold())
 
@@ -826,7 +1004,8 @@ EXPECTED_FEEDBACK_COUNTS = {
 
 
 def convert_sources(raw_data_dir: Path, required_kinds: Sequence[str] = DEFAULT_REQUIRED_KINDS,
-                    check_known_feedback_counts: bool = False) -> ConversionBundle:
+                    check_known_feedback_counts: bool = False,
+                    required_document_kinds: Sequence[str] = DEFAULT_REQUIRED_DOCUMENT_KINDS) -> ConversionBundle:
     """Convert supported files without writing to, renaming, or deleting inputs."""
     raw_data_dir = raw_data_dir.resolve()
     paths = discover_sources(raw_data_dir)
@@ -870,6 +1049,17 @@ def convert_sources(raw_data_dir: Path, required_kinds: Sequence[str] = DEFAULT_
     for kind in missing_kinds:
         bundle.issues.append({"severity": "error", "code": "required_input_kind_missing",
                               "kind": kind, "message": f"No successfully converted source of kind '{kind}' was found."})
+    available_document_kinds = sorted({
+        str(source.get("document_kind")) for source in bundle.source_files
+        if source.get("kind") == "document" and source.get("document_kind")
+    })
+    missing_document_kinds = sorted(set(required_document_kinds) - set(available_document_kinds))
+    for document_kind in missing_document_kinds:
+        bundle.issues.append({
+            "severity": "error", "code": "required_document_kind_missing",
+            "document_kind": document_kind,
+            "message": f"No successfully converted document of kind '{document_kind}' was found.",
+        })
     successful_source_count = len(bundle.source_files)
     observed_feedback: dict[str, dict[str, int]] = {}
     for source_summary in bundle.manifest.get("sources", []):
@@ -902,7 +1092,7 @@ def convert_sources(raw_data_dir: Path, required_kinds: Sequence[str] = DEFAULT_
         status = "partial" if successful_source_count else "failed"
     if successful_source_count == 0:
         status = "failed"
-    elif missing_kinds or any(issue["severity"] == "error" for issue in bundle.issues):
+    elif missing_kinds or missing_document_kinds or any(issue["severity"] == "error" for issue in bundle.issues):
         status = "partial"
     else:
         status = "succeeded"
@@ -910,8 +1100,11 @@ def convert_sources(raw_data_dir: Path, required_kinds: Sequence[str] = DEFAULT_
         "conversion_version": CONVERSION_VERSION,
         "status": status,
         "required_kinds": list(required_kinds),
+        "required_document_kinds": list(required_document_kinds),
         "available_kinds": sorted(source_kinds),
+        "available_document_kinds": available_document_kinds,
         "missing_kinds": missing_kinds,
+        "missing_document_kinds": missing_document_kinds,
         "known_feedback_count_check_enabled": check_known_feedback_counts,
         "known_feedback_counts": known_count_check,
         "sources": bundle.manifest.get("sources", []),

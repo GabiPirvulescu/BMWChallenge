@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from services.ingestion import (  # noqa: E402
     DEFAULT_REQUIRED_KINDS,
+    DEFAULT_REQUIRED_DOCUMENT_KINDS,
     ConversionError,
     convert_sources,
     write_bundle,
@@ -33,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--required-kind", action="append", dest="required_kinds",
                         choices=("feedback", "survey", "sales", "document"),
                         help="Required source kind; defaults to feedback, survey, sales, and document.")
+    parser.add_argument("--required-document-kind", action="append", dest="required_document_kinds",
+                        choices=("option_catalog", "corporate_report", "document"),
+                        help="Required PDF subtype; defaults to option_catalog and corporate_report.")
     parser.add_argument("--check-known-feedback-counts", action="store_true",
                         help="Fail the bundle as partial if complete-export row/comment targets differ from the Role 01 baseline.")
     return parser
@@ -41,13 +45,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     required = args.required_kinds if args.required_kinds is not None else DEFAULT_REQUIRED_KINDS
+    required_documents = (args.required_document_kinds if args.required_document_kinds is not None
+                          else DEFAULT_REQUIRED_DOCUMENT_KINDS)
     try:
         raw_dir = args.raw_data_dir.resolve()
         output_dir = args.output_dir.resolve()
         if output_dir == raw_dir or raw_dir in output_dir.parents:
             raise ConversionError("Output directory must be outside the raw data directory")
         bundle = convert_sources(raw_dir, required_kinds=required,
-                                 check_known_feedback_counts=args.check_known_feedback_counts)
+                                 check_known_feedback_counts=args.check_known_feedback_counts,
+                                 required_document_kinds=required_documents)
         manifest_path = write_bundle(bundle, output_dir, raw_dir)
     except (ConversionError, OSError) as exc:
         print(f"Conversion failed: {exc}", file=sys.stderr)
