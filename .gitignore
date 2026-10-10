@@ -1,5 +1,5 @@
 .DS_Store
-BMW-Data
-BMW-Data/
+# Local source datasets; keep out of commits.
+/BMW-Data/
 .venv/
 scratch/
