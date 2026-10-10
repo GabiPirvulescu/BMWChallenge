@@ -1,2 +1,5 @@
 .DS_Store
 BMW-Data
+BMW-Data/
+.venv/
+scratch/
