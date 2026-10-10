@@ -1,10 +1,10 @@
 # BMW ConceptCraft AI: Core Application Implementation Plan
 
-- **Delivery window:** 10–12 hours, five people, AI-assisted implementation
+- **Delivery window:** 10–12 hours; four implementation owners plus one pitch/demo/submission owner; AI-assisted implementation
 - **Product:** Evidence-backed product requirements workbench for BMW Product Managers
 - **Process:** Market research and product planning, through G1 concept freeze
 - **Scope:** F70, G60/G68, G70, and explicitly labeled successor/Neue Klasse proposals
-- **Implementation:** React/Vite frontend, FastAPI backend, SQLite, structured LLM calls
+- **Implementation:** Extend the existing Neo4j/FastAPI/Streamlit engine with validated LLM calls, versioned decisions, and explicit evidence lineage
 
 ## 1. The Tangible Product We Are Building
 
@@ -99,7 +99,7 @@ Implement the workflow as a Python state machine in `analysis.py`, with each com
 The two graphs serve different purposes:
 
 - **Workflow graph:** `consolidate → retrieve → draft → validate → score → propose → human review → decision/export`. Initial generation follows predefined retrieval steps; contextual review can choose additional read-only tools within a bounded loop.
-- **Evidence graph:** requirement revision → signal revision → feedback spans → source rows, plus requirement/score → survey/sales facts → cells, strategy/equipment chunks → PDF pages, and revision → decisions/history. SQLite identifiers and joins preserve these relationships.
+- **Evidence graph:** requirement revision → signal revision → feedback spans → source rows, plus requirement/score → survey/sales facts → cells, strategy/equipment chunks → PDF pages, and revision → decisions/history. Versioned Neo4j nodes and explicit evidence relationships preserve these links.
 
 Persist run context: entity IDs/revisions, planning scope, source/config versions, retrieved evidence IDs, model/prompt version, tool calls, validation failures, and result/suggestion IDs. A PM review is a saved state awaiting a later UI action; no background worker remains blocked while the PM thinks.
 
@@ -112,82 +112,99 @@ Read-only questions and discarded suggestions leave requirement content, scores,
 
 ## 3. Architecture and Repository Structure
 
+### 3.0 Existing Implementation Baseline
+
+Use `origin/ai-requirements-engine` at reviewed snapshot `3bd0251` as the implementation baseline. It already contains data loading, graph statistics, batched signal/draft generation, FastAPI review routes, Streamlit screens, and 250 exported proposals. The useful review findings are integrated here and in the role guides; [AI_ENGINE_BRANCH_REVIEW.md](AI_ENGINE_BRANCH_REVIEW.md) remains the original assessment.
+
+The branch has not been merged/fixed by this documentation task. The structures below are extensions/adapters to existing code, not a claim that all planned features are implemented. Keep Neo4j as the single authoritative store and Streamlit as the primary UI for the delivery window; avoid a simultaneous SQLite/React rewrite. The exported proposals require source/target/governance validation before being presented as validated requirements.
+
+**Reuse inventory:** steps 00–03 provide enrichment/loading/graph-statistic skeletons; steps 04–06 provide batched provider calls, signal/draft schemas and legacy pure score helpers; step 07 provides list/detail/transition/history routes; step 08 provides four UI pages; step 09 provides JSON/CSV/summary export. Extend these boundaries with the assigned repairs in Section 11.4.
+
+#### Reviewed Artifact and Test Baseline
+
+| Observation at `3bd0251` | What implementation must establish |
+| :--- | :--- |
+| 250 proposals with unique IDs: F70 49, G60 102, G70 99 | Preserve legacy candidates and validate selected revisions; count alone does not establish requirement quality. |
+| All 250 histories empty | Add actual derivation/change/decision events; legacy artifacts do not demonstrate human review. |
+| 750 quote occurrences: 538 exact model-text substrings and 212 non-matches; zero exported original feedback IDs | Resolve original IDs/spans/locators and issue membership. Transformed or ambiguous evidence remains unverified; non-match alone does not prove fabrication. |
+| 218 self-report all SMART flags true; 225 declare no gaps | Targets, feasibility, dates and assumptions require independent source/proposal provenance and PM review. |
+| Zero WEAK/RED proposals | Keep an actual evidence-gap case visible; the current filter is not proof of honest uncertainty handling. |
+| All 250 priorities match legacy arithmetic | Preserve labeled arithmetic compatibility, then recompute the new scoped policy from validated inputs. |
+| 16 offline diagnostics characterized/reproduced behavior; no branch test suite or tested dependency lock found | Implement corrected regression tests and pin a tested environment. Passing counterexample reproductions are not passing correctness acceptance tests. |
+| No live Cypher/container/raw-conversion/model run validated during review | Close these specific verification gaps before presenting a working deployment. |
+
 ### 3.1 Runtime
 
-- **Backend:** FastAPI, Pydantic, Uvicorn, SQLite; OpenPyXL/Pandas for workbooks; PyPDF or pdfplumber for PDFs.
-- **Frontend:** React, TypeScript, Vite, Tailwind, Lucide, TanStack Query. Add charts only where a simple table is insufficient.
-- **LLM:** one OpenAI-compatible provider through `llm_client.py`, configured with `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`.
-- **Retrieval:** SQLite FTS5 for lexical retrieval in the core build. Persisted embeddings plus NumPy cosine search can be added behind the same retrieval interface.
-- **Execution:** one backend process with a background analysis worker. Persist run state in SQLite; no separate queue infrastructure.
-- **Python:** start with the existing 3.14 environment. Confirm dependency installation in hour 1; use a compatible pinned runtime if a required dependency blocks the build.
+- **Backend:** extend the existing FastAPI/Pydantic/Uvicorn API and Neo4j driver; add OpenPyXL and a PDF parser for raw conversion.
+- **Frontend:** complete/polish `pipeline/08_streamlit_ui.py`; all UI work belongs to Owner 4. Rendering calls HTTP, not Cypher/model/scoring logic.
+- **LLM:** preserve OpenAI/Anthropic selection behind a shared adapter using the branch's `OPENAI_API_KEY`/`OPENAI_MODEL` and `ANTHROPIC_API_KEY`/`CLAUDE_MODEL` configuration. Repair runner/compose selection before relying on startup.
+- **Retrieval:** Neo4j full-text indexes or a bounded lexical provider behind the evidence interface. Counts/citations come from authoritative nodes, not search hits or model prose.
+- **Execution:** one API process with persisted background run state and bounded engine calls; no separate queue infrastructure.
+- **Python:** the branch Dockerfile uses 3.12; local review imports worked on 3.14. Pin a tested project environment rather than relying on unconstrained lower-bound dependencies.
 
-SQLite stores authoritative relationships and revisions. The retrieval index only selects candidate evidence; it never becomes the source of truth for counts or citations.
+Use Neo4j managed write transactions for state, revision, ranking and audit atomicity. Store nested immutable snapshots as JSON properties; native Neo4j properties cannot store arbitrary nested dictionaries.
 
 ### 3.2 Proposed Files
 
 ```text
-backend/
-  app/
-    main.py                   # FastAPI app, routes, lifespan
-    config.py                 # Environment and model configuration
-    db.py                     # Connections, schema setup, transaction helper
-    schemas.py                # Shared Pydantic request/response contracts
-    cli.py                    # Import, analysis, and audit verification commands
-    ingestion/
-      feedback.py             # Comments, raw rows, and annotations
-      studies.py              # CN/EU means and US rating distributions
-      sales.py                # Vehicle-line/region/year facts
-      documents.py            # Page-aware PDF extraction
-      mappings.py             # Countries, powertrains, categories, vehicle lines
-    services/
-      sources.py              # Source records and citation resolution
-      signals.py              # Topic buckets, issue evidence, distinct counts
-      retrieval.py            # Relevant study/option/strategy evidence
-      tool_registry.py        # Typed read-only tool schemas and server-side dispatch
-      llm_client.py           # Structured output, bounded retry, caching
-      analysis.py             # Run orchestration and draft validation
-      review_assistant.py     # Scoped chat, tool loop, validated pending suggestions
-      scoring.py              # Factors, intervals, ECI, ranking
-      decisions.py            # Edits, transitions, revisions, challenge application
-      audit.py                # Events, hash chain, history queries
-      export.py               # Sample list and frozen G1 package
-  tests/
-frontend/
-  src/
-    api/                      # API client and types generated from OpenAPI
-    components/
-      RequirementsTable.tsx
-      RequirementWorkbench.tsx
-      SmartEditor.tsx
-      EvidencePanel.tsx
-      ScoreBreakdown.tsx
-      DecisionDialog.tsx
-      HistoryTimeline.tsx
-      AnalysisRunStatus.tsx
-      ReviewAssistantPanel.tsx
-      ChangePreview.tsx
-    pages/
-      RequirementsPage.tsx
-      SourcesPage.tsx
-      ReviewPackagePage.tsx
-    App.tsx
-contracts/                    # Agreed example payloads; synthetic fixtures labeled
-var/                          # Local DB, caches, extracted text, and exports
+models.py, config.py          # Owner 3 coordinates shared contracts/runtime
+pipeline/
+  00_preprocess.py            # Owner 1: raw conversion/processed-format contract
+  01_load_neo4j.py            # Owner 1: versioned evidence/facts
+  02_build_kg.py              # Owner 1: evidence relationships/statistics
+  03_vfc_analysis.py          # Owner 1: distinct cohort/topic counts
+  04_extract_signals.py       # Owner 2: keyed/validated signal extraction
+  05_correlate_studies.py     # Owner 2: reviewed/scoped study context
+  06_generate_requirements.py # Owner 2 drafting; Owner 3 score/write helpers
+  07_pm_review_api.py         # Owner 3: all API/decision composition
+  08_streamlit_ui.py          # Owner 4: complete frontend
+  09_export_report.py         # Owner 3: full sample/audit/freeze exports
+services/                    # Extract reusable helpers without replacing all scripts
+  evidence.py, ingestion.py  # Owner 1
+  signals.py, llm_client.py   # Owner 2
+  analysis.py                # Owner 2: bounded engine stages; Owner 3 mounts jobs
+  review_assistant.py         # Owner 2
+  tool_registry.py           # Owner 2
+  scoring.py, decisions.py    # Owner 3
+  audit.py, export.py         # Owner 3
+ui/
+  client.py, components.py    # Owner 4: HTTP adapter/rendering
+  fixtures.py                # Owner 4: labeled synthetic preview
+tests/
+  data/                      # Owner 1
+  intelligence/              # Owner 2
+  backend/                   # Owner 3
+  frontend/                  # Owner 4
+contracts/                   # Shared DTO examples/linked synthetic fixture
+docs/                        # Owner 5: narrative/workflow/demo/QA/checklist
+var/                         # Private processed inputs/caches/exports/presentation
 ```
+
+Agree the step-06 helper extraction before concurrent edits: Owner 2 owns prompts/model validation, Owner 3 owns scoring/revision writes. Other owners request shared contract/runtime changes from Owner 3.
 
 Keep raw BMW data and derived quotes, databases, caches, and exports out of public commits. Extend `.gitignore` for `var/` and credentials. Frontend development fixtures are synthetic and explicitly labeled.
 
 ### 3.3 Development Commands to Provide
 
-From the repository root, after dependency installation:
+After the engine branch is integrated, dependencies installed, and Owner 1's raw-conversion extension and Owner 3's startup fixes are complete:
 
 ```bash
-.venv/bin/python -m backend.app.cli ingest --data-dir BMW-Data
-.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000
-npm run dev --prefix frontend
+python pipeline/00_preprocess.py --raw-data-dir BMW-Data --output-dir var/processed
+python -m uvicorn pipeline.07_pm_review_api:app --host 127.0.0.1 --port 8000
+streamlit run pipeline/08_streamlit_ui.py
 ```
 
-The CLI uses the same services as the API. Vite proxies `/api` to the backend, so the frontend has one relative API base path.
+The conversion flags above are a required extension; the reviewed step 00 only enriches existing external JSON. The fixed pipeline runner uses `BMW_DATA_DIR` pointing at the converted data and accepts either configured model provider. Frontend uses explicit `API_BASE_URL` for local/container access. Owner 3 documents the tested local/Compose startup path.
+
+### 3.4 Integration and Legacy-Artifact Treatment
+
+1. Owner 3 coordinates bringing the reviewed engine code into the team's shared integration baseline, preserving current documentation and the union of ignore rules. Split step 06's drafting versus scoring/write helpers before parallel edits.
+2. Agree the processed-format manifest, source/claim IDs, strict keyed model outputs, legacy/v1 score versions, uppercase states, and expected-revision mutation contracts with Owners 1/2/4.
+3. Fix startup: runner accepts OpenAI or Anthropic; Compose forwards the selected key/model settings; UI receives API_BASE_URL=http://api:8000 in containers. Missing input/provider/server states stay explicit.
+4. Preserve the 250 exported candidates as legacy/unverified. Owner 1 resolves raw source versions/locations; Owner 2 validates exact spans, assignment and proposed claims; Owner 3 creates new validated/reviewable revisions. Source matching must not silently select an ambiguous first hit or replace the original artifact.
+5. Block approval/freeze while the underlying basis remains unverified. A model SMART flag, GREEN gate, matched arithmetic or empty gap array cannot satisfy review guards. Preserve PM-approved/rejected revisions when generation runs again.
+6. Store future processed files/caches/customer-quote exports in private `var/` storage. Integrate `.gitignore` as a union retaining existing `.venv`/data exclusions; ignoring a path does not remove tracked content. Repository-history rewriting is outside this implementation task.
+7. Use fixture tests for independent work, then prove real Neo4j rollback/queries, actual container UI networking, raw conversion and a cited live generation/review. Record these results separately from the review's offline diagnostics.
 
 ## 4. Data Model and Real Input Handling
 
@@ -215,16 +232,16 @@ Other important constraints:
 
 ### 4.2 Storage Contract
 
-Use relational identifiers and JSON payloads for complex versioned structures to keep implementation short. All source-derived entities point to immutable source versions.
+Use stable identifiers, explicit Neo4j relationships, and JSON strings for complex immutable snapshots. The following logical entity names define the data contract; map them to graph labels such as SourceFile, SourceRecord, CustomerFeedback, FeedbackAnnotation, SignalRevision, RequirementRevision, AuditEvent, and FreezeSnapshot. Reuse existing study/sales/equipment labels while adding provenance.
 
-| Table | Essential fields / purpose |
+| Logical entity | Essential fields / purpose |
 | :--- | :--- |
 | `source_files` | `id`, filename, SHA-256, kind, imported timestamp, import summary; same file hash is idempotent |
 | `source_records` | `id`, `source_file_id`, locator JSON, raw payload JSON, optional `feedback_id`; one record per spreadsheet row or extracted fact location |
 | `feedback_comments` | `id`, source version, original ID, source label, derivative, country, region, normalized/original powertrain, original text |
 | `feedback_annotations` | `id`, `feedback_id`, `source_record_id`, original feedback type and VFC level 2/3 labels |
 | `facts` | `id`, kind (`survey`, `sales`, `option`), derivative/line, region, powertrain if known, year, metric, value/distribution, unit/scale metadata, source record references |
-| `document_chunks` | `id`, source file, 1-based PDF page, optional printed page label, chunk text, derivative/market metadata; FTS5 index |
+| `document_chunks` | `id`, source file, 1-based PDF page, optional printed page label, chunk text, derivative/market metadata; full-text index |
 | `signals` | Composite key `(id, revision)`, title, category, source scope, consolidation method/configuration, summary JSON, analysis run ID |
 | `signal_links` | Signal ID/revision, feedback ID, original-text span, polarity, assignment method, annotation/source references; distinct comment counting despite multiple spans |
 | `requirements` | `id`, current revision, current status, approved revision or null; compact current-state index |
@@ -237,7 +254,7 @@ Use relational identifiers and JSON payloads for complex versioned structures to
 | `audit_events` | `id`, entity type/ID/revision, UTC time, actor kind/ID, action, before/after JSON, rationale, run/config references, previous/current hash |
 | `freeze_snapshots` | `id`, selected approved revisions, source/config versions, accepted assumptions, ranking snapshot, audit checkpoint, actor, timestamp, complete export payload |
 
-Enable SQLite foreign keys and WAL. Add indexes for feedback scope, source references, requirement status, and audit entity/time. Serialize writes through transactions; do not share one live connection across worker threads.
+Add graph uniqueness constraints for IDs/composite revision keys and indexes for scope/source/status/time. Use an injected driver and managed write transactions; every related requirement/score/rank/audit write uses the same transaction. Serialize ledger-head updates and validate/lock current revisions so concurrent mutations cannot fork history or silently overwrite newer work.
 
 ### 4.3 Feedback Import
 
@@ -275,7 +292,7 @@ The sales workbook calls its Europe region `EU`. Document the commercial mapping
 Start with approximately 8–12 in-scope topics: HVAC operation, infotainment/navigation, connectivity, seating/comfort, storage/space, visibility, charging UX, perceived range, driving experience, and equipment packaging. Final names come from inspected VFC categories.
 
 1. Map imported annotations into topic buckets per derivative. Keep positive, negative, and request evidence distinct.
-2. Calculate distinct-comment bucket counts and regional/powertrain coverage in SQL.
+2. Calculate distinct-comment bucket counts and regional/powertrain coverage through parameterized Cypher/provider queries.
 3. Select up to 24 comments per bucket for initial discovery: different sources/markets/powertrains where available, positive counterexamples, and recurring friction. Record the selection method and cap; do not call it statistically representative.
 4. Ask the model to propose issue-specific signals and return exact original-text spans with feedback IDs and polarity.
 5. Validate that each span is a substring of the referenced original comment. Invalid citations are rejected, not repaired by inventing text.
@@ -318,7 +335,7 @@ For example, complaints about difficult access to temperature controls can justi
 
 Pydantic validates the output shape. Service validation checks:
 
-1. IDs refer to supplied evidence and source versions.
+1. Each output includes its requested input group/signal ID and cites supplied immutable evidence/source versions; map by input ID rather than array position. Unknown/duplicate IDs fail validation; missing outputs create explicit partial results.
 2. Quoted spans are exact; fact values match the stored facts.
 3. Supporting customer evidence exists for the problem statement, or the draft explicitly identifies a study-only basis.
 4. Markets, powertrains, source derivatives, and target derivatives are explicit.
@@ -326,9 +343,11 @@ Pydantic validates the output shape. Service validation checks:
 6. Unsupported quantitative claims and future assumptions are labeled.
 7. Regulatory engineering and detailed component/BOM specifications do not replace the customer-facing requirement.
 
+Use collision-resistant full-scope signal/derivation IDs rather than VFC prefixes or per-run ordinals. Persist new signal/requirement revisions without overwriting human decisions. Generation can include a traceable weak-evidence draft with explicit limitations; the legacy STRONG/MODERATE-only filter must not hide the uncertainty demonstration.
+
 Citation/number checks establish traceability, not semantic proof that a passage entails the claim. The draft records its interpretation for PM review.
 
-Then the backend assigns a unique requirement ID, calculates scores and evidence quality, saves revision 1 with status `Proposed`, records the derivation, and refreshes the baseline ranking. Invalid drafts are retained as run failures for inspection but do not appear as valid proposed requirements.
+Then the backend assigns a stable unique requirement/derivation ID, calculates scores and evidence quality, saves revision 1 with status `DRAFT`, records the derivation, and refreshes the baseline ranking. Invalid drafts are retained as run failures for inspection but do not appear as valid proposed requirements. Drafting belongs to Owner 2; persistence/scoring belongs to Owner 3.
 
 Implementation sequence inside `analysis.py`:
 
@@ -339,12 +358,9 @@ async def derive_one(signal, scope, run_id):
     validated = validate_draft(draft, pack, signal)
     scores = scoring.calculate(validated, signal, baseline_config)
     evidence = scoring.assess_evidence(validated, signal, pack)
-    # No network/model calls inside the database write transaction.
-    with db.transaction():
-        requirement = revisions.create_proposed(validated, scores, evidence, run_id)
-        audit.record_derivation(requirement, signal, pack, run_id)
-        ranking.refresh_baseline(trigger=requirement.id)
-    return requirement.id
+    # Backend writer uses one managed Neo4j transaction for revision/rank/audit.
+    # All network/model calls above complete before that transaction starts.
+    return requirement_writer.create_draft(validated, scores, evidence, run_id)
 ```
 
 This shows the path for a new requirement; the service checks cached/existing derivations before entering it. Imports, model calls, and evidence retrieval remain independently callable/testable modules.
@@ -391,7 +407,7 @@ Final review result: cited `answer`, `coverage_gaps`, optional `proposed_patch`,
 
 ## 6. The Requirement Contract
 
-The backend owns this contract; frontend types are generated from OpenAPI. Complex fields live in the revision payload so history can reconstruct exactly what the PM reviewed.
+The backend owns this contract; the frontend client validates/normalizes responses against the shared OpenAPI/Pydantic models. Complex fields live in the revision payload so history can reconstruct exactly what the PM reviewed.
 
 | Field | Required contents |
 | :--- | :--- |
@@ -426,6 +442,8 @@ Priority = 100 × (0.40 × CustomerValue
 
 Weights are an explicit PM policy, not learned truth. Store them with the formula version. The core build uses one immutable baseline config; what-if previews do not silently change the baseline or approvals.
 
+The branch's legacy calculation uses model impact, max hard-coded 2025 market volume and inverse effort, with G60/G70 RoW zeroed. Correct arithmetic under that policy does not validate scope or inputs. Owner 3 replaces the reach inputs with Owner 1's sourced 2030 facts and records the new policy version; do not simply multiply old scores by ten and call them v1.
+
 **Customer value:**
 
 - Severity levels 1–4: cosmetic/minor friction; repeated usability friction; core experience unreliable or difficult; core experience unavailable/major recurring blocker.
@@ -449,7 +467,7 @@ Weights are an explicit PM policy, not learned truth. Store them with the formul
 
 Entirely unknown factors use a clearly marked provisional midpoint of `0.5`; expose a score range calculated with their lower/upper values of 0/1. Partially observed customer factors use the lower-bound/range rule above. Do not display an unknown factor as a sourced fact. Targets with no valid comparable volume require a provisional reach factor.
 
-The baseline ranks current `Proposed`, `UnderReview`, and `Approved` requirements. `Rejected` and `Deferred` retain scores/history but have no active rank. Sort by effective score descending, then requirement ID for deterministic ties. Keep calculated score and any PM score override separately. Content/evidence changes clear an old override unless the PM explicitly reaffirms it with a new rationale.
+The baseline ranks current `DRAFT`, `PM_REVIEW`, and `APPROVED` requirements. `REJECTED` and `POSTPONED` retain scores/history but have no active rank. Sort by effective score descending, then requirement ID for deterministic ties. Keep calculated score and any PM score override separately. Content/evidence changes clear an old override unless the PM explicitly reaffirms it with a new rationale. This is the new versioned 0–100 policy; existing branch 0–10 scores remain labeled legacy until recalculated from validated inputs.
 
 ### 7.2 Evidence Confidence Index
 
@@ -470,6 +488,8 @@ ECI = 100 × (0.35 × support
 
 Always show low-support warnings, unknown respondent counts, source concentration, future assumptions, and regional gaps alongside the index. High ECI does not establish an AI-proposed target or architecture claim. Priority and ECI are independent; do not hide promising low-evidence requirements by multiplying the scores.
 
+Remove legacy automatic STRONG/confidence=1.0 from broad count alone and automatic upgrade from ambiguous/opposing studies. Opaque Source A–D labels remain opaque unless semantics are documented. Contradiction and coverage are explicit inputs; native study scales/regions/derivatives cannot be pooled into an unsupported average. Legacy ±15% impact bounds are labeled sensitivity assumptions, never a statistical confidence interval.
+
 ### 7.3 Regional Differences and Optional Sensitivity
 
 - Different satisfaction means produce a `satisfaction_difference` observation, not an inferred preference for touch versus physical controls.
@@ -483,14 +503,14 @@ Always show low-support warnings, unknown respondent counts, source concentratio
 
 ### 8.1 Status Model
 
-Persistent statuses: `Proposed`, `UnderReview`, `Approved`, `Rejected`, `Deferred`.
+Use the existing uppercase status vocabulary: `DRAFT`, `PM_REVIEW`, `APPROVED`, `REJECTED`, `POSTPONED`. UI labels can be Proposed, Under review, Approved, Rejected, Deferred. Adapt legacy `CONFLICTED` to `PM_REVIEW` plus an explicit conflict flag; conflict and human decision are separate dimensions.
 
 ```text
-Proposed → UnderReview                 explicit Start review
-Proposed / UnderReview → Approved      PM approval, validation, rationale
-Proposed / UnderReview → Rejected      PM rationale
-Proposed / UnderReview → Deferred      PM rationale
-Approved / Rejected / Deferred → UnderReview   explicit reopen/edit
+DRAFT → PM_REVIEW                         explicit Start review
+DRAFT / PM_REVIEW → APPROVED              PM approval, validation, rationale
+DRAFT / PM_REVIEW → REJECTED              PM rationale
+DRAFT / PM_REVIEW → POSTPONED             PM rationale
+APPROVED / REJECTED / POSTPONED → PM_REVIEW   explicit reopen/edit
 ```
 
 Challenge is an action with a separate run/result, not a new decision status. G1 inclusion is a freeze-snapshot selection, not another ambiguous status.
@@ -501,12 +521,14 @@ Every requirement content/evidence/score/status mutation includes `expected_revi
 
 Return HTTP 409 on stale revisions and let the UI reload/compare. Return 422 for missing rationale or invalid transitions. Use server-confirmed updates for approval/edit actions; do not show an optimistic approval before it succeeds.
 
+Reject AI_SYSTEM decision authority and route/body ID mismatch; trim/validate rationale for every decision/override. Validate finite values and override bounds against the active score policy, including explicit zero. Backend uses one managed Neo4j write callback for revision/status/score/ranking/suggestion/audit changes and records actual before/after values. Injected audit failure must roll back all mutations, closing the reviewed auto-commit defect.
+
 Approval requires:
 
 - Complete, actionable SMART fields, including a measurable acceptance target and milestone.
 - At least one valid underlying finding/study source link.
 - PM review of proposed targets and milestone, and explicit acceptance or resolution of feasibility/scope assumptions.
-- The current reviewed revision; any later content, evidence, or score edit clears approval and creates an `UnderReview` revision.
+- The current reviewed revision; any later content, evidence, or score edit clears approval and creates a `PM_REVIEW` revision.
 
 The prototype uses a named PM selector as actor identity. AI/system events identify the model/run or service. This supports the demonstrable workflow; enterprise authentication is a later integration.
 
@@ -522,7 +544,7 @@ Example interaction, with actual retrieved citations replacing the example's gen
 2. Assistant examines supporting comments, regional coverage, and mapped study facts. If only US evidence supports the specific preference, it explains the gap rather than inventing a China preference.
 3. Assistant proposes narrowing target scope and adding a regional validation assumption. The UI shows before/after fields and a backend-calculated priority preview.
 4. PM selects **Apply**, optionally edits the proposal, and enters the rationale.
-5. Backend checks the revision, validates the allowed patch and evidence, creates a new revision, recomputes affected scores/ECI/ranking, and records changes in one transaction. An approved item becomes `UnderReview`.
+5. Backend checks the revision, validates the allowed patch and evidence, creates a new revision, recomputes affected scores/ECI/ranking, and records changes in one transaction. An approved item becomes `PM_REVIEW`.
 6. PM separately selects **Approve** after reviewing the resulting revision and assumptions.
 
 Signal-only conversations can request **Create requirement draft**, which submits the selected signal to the normal analysis/validation/scoring path. Read-only insight discussion does not mutate signal membership. Requirement conversations can modify a pending suggestion; direct form edits remain available for simple changes.
@@ -598,7 +620,9 @@ Example approval request:
   "action": "approve",
   "expected_revision": 3,
   "actor_id": "pm-demo-1",
+  "actor_role": "PM_USER",
   "rationale": "Reviewed linked evidence and accepted the proposed usability target for concept planning.",
+  "reviewed_target_ids": ["metric-1", "milestone-1"],
   "accepted_assumption_ids": ["assumption-1"]
 }
 ```
@@ -625,7 +649,9 @@ Use tabs or sections within one large drawer/panel:
 
 Persistent actions: **Start review**, **Edit**, **Challenge**, **Approve**, **Reject**, **Defer**. A decision dialog requires rationale and shows outstanding targets/assumptions. Invalid actions are disabled and server-enforced.
 
-After a confirmed mutation, invalidate requirement detail/list, history, and ranking queries. Preserve unsaved editor state if an API request fails. Show a reload/compare prompt for HTTP 409.
+After a confirmed mutation, refresh server detail/list/history/ranking and invalidate matching Streamlit cache/session data. Preserve unsaved editor state if an API request fails. Show a reload/compare prompt for HTTP 409. Rendering/rerunning the UI must not itself submit mutations.
+
+Owner 4 reads explicit API_BASE_URL instead of hard-coded localhost, normalizes legacy `gate` list versus `gate_color` detail fields, and shows score policy/scale. An override-enabled control distinguishes zero from disabled. Empty legacy histories, unresolved citations and model SMART flags have accurate validation labels; GREEN is an evidence/gate display, not PM approval. Empty API results remain distinct from failures.
 
 ### 9.4 Sources and Review Package Screens
 
@@ -641,6 +667,8 @@ CSV/JSON export includes ID, revision, description/SMART fields, linked finding/
 
 JSON retains nested structures. CSV flattens the main fields and serializes evidence/assumption arrays predictably; it must not silently omit them.
 
+Generate complete exports server-side, independent of table pagination/limit. The reviewed UI downloads summary rows capped at 200 despite 250 proposals; the reviewed CSV omits linked sources/gaps/assumptions. A 250-record fixture must export all 250 with the full BMW field set. Frontend requests that endpoint rather than building files from its displayed page.
+
 ### 10.2 Frozen G1 Package
 
 `POST /api/freezes` validates that each supplied revision is current and approved and that the baseline ranking context has not changed. It captures full requirement payloads, score/configuration, source/signal versions, decisions, accepted assumptions, and an audit checkpoint in one transaction.
@@ -655,32 +683,87 @@ Provide `GET /api/freezes/{id}/audit` and a JSON download on the history view. F
 
 Hash-chain verification requires the complete event prefix through the stored checkpoint, or an explicit proof linking omitted events. The core build exports the complete prefix plus selected-requirement references so a verifier does not mistake a filtered event list for a complete chain. Write `audit.json` and the manifest beside the review package in the private export bundle.
 
-## 11. Five-Person Implementation Split
+## 11. Four Specialized Builders + One Pitch Owner
 
-| Owner | Primary files / responsibility | First integration handoff |
+Everyone has a specialty, independent tests, and fixed file ownership. Only Owner 4 builds frontend; only Owner 2 develops model prompts/tool reasoning. Owner 3 coordinates API/runtime integration. Each role has a separate detailed assignment:
+
+| Owner / guide | Exact scope | Independent verification |
 | :--- | :--- | :--- |
-| **1 — Data and provenance** | `ingestion/*`, source service; imported comments/annotations, survey/sales facts, page-aware documents | Actual feedback import and source-resolving evidence payload by hour 2 |
-| **2 — AI and consolidation** | Signal/retrieval/tool/LLM/analysis/review services; structured drafting and scoped chat | One valid AI draft with real source IDs by hour 2.5–3 |
-| **3 — Backend and decisions; integration lead** | Schema/contracts, scoring, revisions, audit, API, freeze/export | List/detail/edit/decision APIs and one transactional audit path by hour 2.5 |
-| **4 — Core PM workbench** | App shell, requirements page/table, SMART editor, decision dialogs, review-assistant panel/change preview | Table → detail → edit/approve using agreed contracts by hour 3 |
-| **5 — Evidence and verification UI** | Evidence panel, score explanation/history, sources/package UI; demo stewardship | Verbatim evidence and score breakdown for the first real requirement by hour 3 |
+| **[1 — Data engineering](roles/01_DATA_AND_EVIDENCE.md)** | Raw conversion, source versions/annotations, native facts, graph statistics and evidence-provider functions | Synthetic XLSX/PDF → exact evidence/counts; real import and query checks |
+| **[2 — AI engine](roles/02_AI_AND_REVIEW_ASSISTANT.md)** | Existing extraction/drafting, keyed/cited validation, reviewed study context, bounded review tools and suggestions | Fake model/evidence → valid draft/diff; invalid IDs/order/quotes rejected; one live cited check |
+| **[3 — Backend/governance](roles/03_BACKEND_AND_GOVERNANCE.md)** | API/contracts, deterministic scoring, PM guards, revisions, transactions, audit, complete export/freeze, runtime | Fake-provider API tests; real test-graph atomicity; score fixtures and immutable exports |
+| **[4 — Frontend](roles/04_FRONTEND_AND_PM_WORKBENCH.md)** | Existing Streamlit screens/client, evidence/score/history/edit/chat/diff controls and server-backed downloads | Mock API → complete interaction; no rendering mutations; live/container walkthrough |
+| **[5 — Pitch/demo/submission](roles/05_PITCH_DEMO_AND_SUBMISSION.md)** | Narrative, deck, workflow explanation, manual acceptance, verified cases, timing, recording/Q&A and private artifact checklist | Rehearsed 3–5 minute story with an actual artifact for every BMW deliverable |
 
-Owner 3 approves shared schema and API contract changes; Owner 1 supplies the provenance schema. Agree these in the first 45 minutes so work can proceed in parallel. Frontend works from labeled contract fixtures until the actual API arrives, then switches to real responses.
+### 11.1 Ownership Rules and Shared Contracts
 
-Each human can delegate bounded tasks to coding agents: a workbook parser, a specified UI component, the scoring module, a revision/audit service, or citation verification. Give agents file ownership, input/output contracts, and completion checks. Use separate worktrees where useful; avoid simultaneous edits to shared contracts/configuration.
+Owner 3 coordinates root `models.py`/`config.py`, constraints, dependencies, API entry points and runner/Compose. Owner 1 supplies source/evidence definitions; Owner 2 supplies signal/draft/review definitions; Owner 3 supplies requirement/score/event/freeze/error contracts. Owner 4 supplies client-facing payload requirements, not backend implementations.
 
-### 11.1 Milestones
+Split `pipeline/06_generate_requirements.py` early: Owner 2 owns model/prompt/validation, Owner 3 owns score/save helpers. Extract reusable helpers instead of simultaneously editing the same block. Owner 1 owns steps 00–03, Owner 2 owns 04–05 and draft logic, Owner 3 owns 07/09 and persistence, Owner 4 owns 08/UI. No other builder implements UI screens.
 
-| Time | Team goal | Required evidence of completion |
+Agree IDs, locators, source/scope distinctions, uppercase status/version semantics, score scales, revision checks and errors in the first 45 minutes. Use one linked synthetic fixture defined in Role 1's guide and assembled in `contracts/fixture_case.json`; fixture IDs resolve across all modules.
+
+### 11.2 Independent Work and Handoffs
+
+- Data provider tests use synthetic input files and fake repositories, then isolated Neo4j query checks.
+- AI tests inject fixture evidence/model/scorer/writer interfaces; no model account or UI required.
+- Backend tests inject fake evidence/engine and use TestClient plus isolated graph transaction checks.
+- Frontend injects mock HTTP responses; it never implements database/scoring/LLM fallbacks.
+- Pitch owner validates the narrative/checklist first, then conducts manual real-app acceptance from hour 3 onward.
+
+Planned test targets after integrating the scaffold:
+
+```bash
+python -m pytest tests/data
+python -m pytest tests/intelligence
+python -m pytest tests/backend
+python -m pytest tests/frontend
+```
+
+Replace test providers with real providers through the same interfaces at integration. Publish fixture/OpenAPI payloads immediately. A handoff includes the callable module/client, fixture proof, passing meaningful tests, one real-provider check when available and explicit remaining gaps.
+
+Use branches/worktrees and bounded agents inside each specialty. Backend scoring/revision/audit/export subtasks can be delegated separately, while Owner 3 coordinates their shared transaction and schema. Integration starts with one validated requirement, not after all code is finished.
+
+### 11.3 Milestones
+
+| Time | Four builders | Pitch/demo owner |
 | :--- | :--- | :--- |
-| **0–0.75h** | Freeze contracts, enums, mappings, scoring policy, provider, schema, and candidate demo topics | Shared payloads and a runnable backend/frontend skeleton |
-| **0.75–3h** | Build the first vertical slice in parallel | Actual feedback → signal → AI draft → score → PM decision → persisted audit event, all visible in the UI |
-| **3–6h** | Complete heterogeneous context and sample generation | Studies/sales/PDF evidence resolves; list spans the supported lines; assumptions and source gaps display |
-| **6–8h** | Complete required workflow and exports | Content/evidence/factor edits, challenge, status transitions, rank history, sample export, frozen review package |
-| **8–10h** | Validate and polish | Three source-checked showcase requirements, essential integration checks, complete walkthrough and pitch |
-| **10–12h** | Buffer and optional differentiation | Sensitivity/regional comparison only if the full core loop is stable; startup/restart and rehearsal complete |
+| **0–0.75h** | Agree reviewed branch baseline, fix startup ownership, freeze contracts/fixtures and split step 06 | Draft narrative, checklist and case-selection questions |
+| **0.75–3h** | Data provider, validated real draft, guarded transactional decision and fixture UI; connect the first real loop | Prepare workflow/deck; begin acceptance as soon as the loop appears |
+| **3–6h** | Native studies/sales/strategy evidence, direct quote IDs, versioned scores/revisions and complete workbench | Verify showcase sources, measure activities and report blockers |
+| **6–8h** | Bounded review chat/apply, full history/rank changes, complete sample export and frozen package | Lock demo route, capture actual outputs and map four deliverable bundles |
+| **8–10h** | Atomicity/citation/contract checks, Docker/live UI walkthrough and polish | Rehearse, record truthful backup, prepare Q&A and artifact bundle |
+| **10–12h** | Buffer; differentiation only once P0 review defects and core loop are resolved | Final rehearsal/submission readiness |
 
-If the hour-3 loop is incomplete, work through that dependency before expanding the feature surface. A requirement card containing only hand-written sample text does not satisfy this milestone.
+First-loop target remains hour 3. Keep a real evidence-gap example visible and source-check the three showcase requirements. Existing legacy outputs or hand-written fixture cards do not establish validated live generation or approval governance.
+
+### 11.4 Branch Repair Backlog
+
+All items below derive from reviewed snapshot `3bd0251`; role guides include their owned tasks and specific tests. **P0 blocks the trustworthy judged demonstration.** The hour-3 vertical slice first closes safety/provenance for one real requirement; complete heterogeneous context and the remaining P0 repairs before the final walkthrough. P1 completes decision quality, sample coverage and reconstruction. Work on independent fixes in parallel.
+
+| ID | Priority | Current defect / code | Lead and supporting roles | Required corrected proof |
+| :--- | :--- | :--- | :--- | :--- |
+| **R01** | P0 | Step 07 accepts AI approval without rationale, arbitrary transitions and mismatched route/body IDs | 3; 4 collects review inputs | AI/blank-rationale/invalid-state/ID-mismatch requests fail without writes; reviewed PM decision succeeds on the current revision. |
+| **R02** | P0 | Separate status/history/override/audit auto-commit writes | 3 | Injected audit failure leaves revision/status/score/rank/turn state unchanged in real Neo4j. |
+| **R03** | P0 | Override 999 accepted; score_before is null | 3; 4 renders scale/toggle | Finite policy-bounded override; actual before/after and calculated/effective scores; explicit zero works. |
+| **R04** | P0 | Step 06 resets ordinal IDs and MERGEs over prior content/status | 3 with 2 | Stable derivation identity, immutable revisions and pending regeneration; approved/rejected content survives rerun/order changes. |
+| **R05** | P0 | Step 04 accepts unvalidated spans/intensity; 20-character category IDs collide | 2 | Reject invalid quote/range; input-ID/span validation and full-scope versioned IDs; same-prefix categories stay distinct. |
+| **R06** | P0 | Steps 04/06 pair outputs by position | 2 | Reverse output order still maps by ID; unknown/duplicate IDs fail and missing entries report partial results. |
+| **R07** | P0 | Scalar feedback type erases annotation polarity; Signal only links broad VFC | 1 with 2; 4 renders evidence | Mixed annotations retained; exact source rows/spans/direct membership; distinct issue counts separate from bucket/annotation counts. |
+| **R08** | P0 | External clean JSON assumed; no raw conversion/corporate-report ingestion | 1; 3 wires runs | From supplied files produce versioned manifest/evidence; quote/cell/page resolves; missing required inputs cannot masquerade as success. |
+| **R09** | P0 | Streamlit calls its own localhost inside Docker | 4 with 3 | Configured API_BASE_URL and actual container UI → API smoke check. |
+| **R10** | P0 | Runner requires Anthropic; Compose omits OpenAI configuration | 3 | OpenAI-only/Anthropic-only configuration supported, selected variables forwarded, neither gives truthful unavailable state. |
+| **R11** | P1 | Max hard-coded 2025 reach, ignored target scope, zeroed G60/G70 RoW | 3 using 1 | Sourced scoped 2030 volumes, G60_G68 deduplication, fixed reference and explicit proxy assumptions. |
+| **R12** | P1 | Broad count implies STRONG=1.0; assumed channel semantics/bias | 3 with 1/2 | Versioned issue-based ECI, coverage/concentration/review gaps; no unsupported channel truth or calibrated-probability claim. |
+| **R13** | P1 | Keyword/native-scale/region pooling and upgrades despite study opposition | 2 with 1/3 | Reviewed metric scope/scale mapping; contradiction remains explicit; ambiguous/opposing study does not inflate strength. |
+| **R14** | P1 | Valid G68 input skipped; study cells/distributions omitted | 1 | G68_CN preserved as source G68, native distribution/cells/unknown N retained; deliberate shared sales-line mapping. |
+| **R15** | P1 | Model SMART/competitor/architecture/date assertions lack evidence | 2 with 3; 4 displays | Source/proposed target provenance, acceptance-test method and PM review; self-checked SMART cannot authorize approval. |
+| **R16** | P1 | Arbitrary ±15% impact range called confidence interval | 3; 4 labels | Documented sensitivity/provisional bounds and range kind; no unsupported statistical interval. |
+| **R17** | P1 | WEAK excluded; no WEAK/RED in existing output | 2; 4 displays | Actual traceable weak/evidence-gap draft visible without invented support or forced high confidence. |
+| **R18** | P1 | Hash omits payload/chain; derivation/content/evidence history missing | 3 | Full chronological versioned events and checkpoint verifier; content/actor/rationale/score tampering detectable; source-to-decision reconstruction. |
+| **R19** | P1 | UI export capped at 200/summary only; CSV omits required evidence/gaps | 3 with 4 | Full 250-record fixture export with every BMW field, independent of pagination; approved snapshot stable after live edit. |
+
+Owner 5 tracks proof of these repairs, not code ownership. Record task ID, implementation/revision reference, fixture regression result, real integration result where required, and remaining limitation in the team's QA/handoff notes. A passed counterexample-characterization test is not closure; assert the corrected result.
 
 ## 12. Verification and Demonstration
 
@@ -697,6 +780,20 @@ If the hour-3 loop is incomplete, work through that dependency before expanding 
 - **Recovery:** cached/live runs are distinguished, partial failures display, saved decisions/history survive restart, and changed audit events fail verification against the trusted checkpoint.
 
 Use focused backend/integration tests for these invariants and one browser walkthrough. Avoid spending the window on exhaustive UI unit tests.
+
+### 12.1.1 Integration Gates Based on the Review
+
+| Gate | Required proof | Owners |
+| :--- | :--- | :--- |
+| **Baseline/contracts, first 45 minutes** | Reviewed code integrated deliberately; shared model/step-06 ownership agreed; tested environment/paths/provider selection and API payloads documented | 3 coordinates 1/2/4 |
+| **One trustworthy vertical slice, target hour 3** | Real original IDs/spans; keyed valid generation; score policy labeled; guarded PM decision and atomic history; UI opens without mutation | 1/2/3/4, witnessed by 5 |
+| **Source/sample readiness, target hour 6** | Native study/G68/sales/strategy/equipment evidence; quote reconciliation for every showcase claim; complete field contract and source/target assumptions | 1/2/3 |
+| **Decision/export readiness, target hour 8** | Reruns preserve decisions; apply and approve separate; complete exports/history/freeze; source gaps/weak case visible | 2/3/4 |
+| **Judged demonstration, hours 8–10** | All P0 repair proofs; real Neo4j rollback/query checks, actual container networking, raw conversion and cited live model run; three verified cases, honest cache/fixture labels and private artifact bundle | 3 coordinates all; 5 rehearses/checks |
+
+For regression tests, use the recorded counterexamples: AI_SYSTEM approval with no rationale; conflicting route/body IDs; override 999; audit failure after status write; same-prefix signal names; reversed model output; rerun over approved data; G68_CN/native distribution; WEAK plus opposing study; and a 250-record export. Preserve the distinction between synthetic/mocked proof and real graph/container/source/model checks.
+
+The reviewed export's 218 SMART-true flags, 225 empty-gap arrays and 538 text matches are not acceptance evidence by themselves. Showcase requirements need independently resolved sources/assignment, reviewed target provenance and a real chronological decision history.
 
 ### 12.2 Three Showcase Cases
 
