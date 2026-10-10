@@ -3,3 +3,15 @@ BMW-Data
 BMW-Data/
 .venv/
 scratch/
+
+# Private runtime configuration; keep the shared template tracked.
+.env
+.env.*
+!.env.example
+
+# Derived BMW evidence, model caches, exports, and local artifacts.
+var/
+BMW-Processed/
+output/
+__pycache__/
+.pytest_cache/
