@@ -160,10 +160,37 @@ BMW requirements must strictly comply with the **SMART** standard:
 
 ---
 
-## 7. Required Deliverables Checklist
+## 7. Expected Deliverables
 
-- [ ] **Working Application Prototype**: Demonstrable full-stack software ingesting the datasets and providing an interactive PM experience.
-- [ ] **Structured Sample Requirements List**: Complete table with Unique ID, SMART Description, Evidence Links, Priority Score, Evidence Level, Uncertainties, and Decision Status.
-- [ ] **End-to-End Workflow Definition**: Clear division between AI autonomous analysis and mandatory PM decision gates.
-- [ ] **Traceable & Reconstructable Audit Trail**: Forensic record of all requirement changes, score overrides, timestamps, actors, and documented rationales.
+### 7.1 BMW-Provided Deliverable Wording
+
+The following four expected deliverables are reproduced from the BMW wording supplied to the team.
+
+#### 1. Concept and Demonstrable Prototype
+
+> A concept and demonstrable prototype of an AI-powered product requirements application that processes heterogeneous inputs, derives product requirements, supports prioritization, and integrates human review.
+
+#### 2. Structured Sample Requirements List
+
+> A structured sample list of derived product requirements. Each requirement should include a unique identifier, a clear and actionable description, its linked findings and sources, a priority or score, the applied prioritization rationale, an evidence level, the key future-facing assumptions and uncertainties and its current decision status.
+
+#### 3. End-to-End Workflow
+
+> A clearly defined end-to-end workflow showing how inputs are processed into proposed and prioritized requirements, which activities the AI performs autonomously, and where human review is mandatory.
+
+#### 4. Demonstrable Audit Trail
+
+> A demonstrable audit trail that makes each requirement traceable from its underlying findings and sources through consolidation, scoring, prioritization, and human decision-making. It should record relevant changes to requirement content, scores, priorities, evidence, and status, including who or what initiated each change, when it occurred, and the documented rationale.
+
+### 7.2 Delivery Checklist
+
+- [ ] **Concept & Working Application Prototype**: Explain the concept and demonstrate heterogeneous input processing, derived product requirements, prioritization, and integrated human review.
+- [ ] **Structured Sample Requirements List**: Include a unique identifier, clear and actionable description, linked findings and sources, priority or score, applied prioritization rationale, evidence level, key future-facing assumptions and uncertainties, and current decision status for every requirement.
+- [ ] **End-to-End Workflow Definition**: Show how inputs become proposed and prioritized requirements, which activities the AI performs autonomously, and where human review is mandatory.
+- [ ] **Traceable & Reconstructable Audit Trail**: Trace requirements from findings and sources through consolidation, scoring, prioritization, and human decisions. Record relevant content, score, priority, evidence, and status changes with initiator, timestamp, and rationale.
+
+### 7.3 Presentation Deliverable
+
 - [ ] **Pitch Presentation Deck (3–5 min)**: Compelling narrative demonstrating real-world value, data grounding, and Trustworthy AI principles.
+
+See `IMPLEMENTATION_PLAN.md` for the concrete prototype features, artifact formats, implementation responsibilities, and acceptance criteria mapped to these deliverables.
