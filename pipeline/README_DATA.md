@@ -69,6 +69,36 @@ page record. It skips when the private source directory is absent. To produce
 an inspectable bundle and manifest, run `00_preprocess.py` with explicit raw
 and output directories as shown above.
 
+To test a separately staged corpus without copying or changing the protected
+source folder, set `BMW_DATA_DIR` to its path. The corpus must include the BMW
+Group Report PDF in addition to the feedback, study, sales, and option-catalog
+files; the report is discovered by a filename containing `report`, `annual`,
+or `strategy` and is stored as `corporate_report` evidence.
+
+## Live Neo4j integration check
+
+`tests/data/test_live_neo4j.py` is skipped unless
+`BMW_NEO4J_TEST_URI` points to a **loopback** Neo4j instance. It imports the
+complete real corpus twice, checks that counts do not grow on reimport, and
+resolves both an exact feedback source row and a corporate-report page citation.
+The test is additive; it does not clear or delete graph data. Use a disposable
+test instance because it writes the imported evidence into its default database.
+
+For an auth-disabled test instance, also set
+`BMW_NEO4J_TEST_AUTH_DISABLED=1`. Otherwise provide dedicated
+`BMW_NEO4J_TEST_USER` and `BMW_NEO4J_TEST_PASSWORD` values. Do not disable auth
+on a shared or network-accessible Neo4j server. Run the full data checks with:
+
+```powershell
+$env:BMW_DATA_DIR = "<staged corpus directory>"
+$env:BMW_NEO4J_TEST_URI = "bolt://127.0.0.1:7687"
+python -m unittest discover -s tests/data -v
+```
+
+The Neo4j driver must be installed from `pipeline/requirements-data.txt` in the
+Python environment running this command. Neo4j itself must already be running;
+the test never starts or configures a system service.
+
 ## Neo4j entities and evidence queries
 
 - `SourceFile` stores filename, content hash, kind, and conversion version.

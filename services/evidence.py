@@ -455,9 +455,10 @@ class Neo4jEvidenceProvider:
                   "document_kind": document_kind, "limit": limit}
         rows = self._read("""
             MATCH (chunk:DocumentChunk)
+            WITH chunk, properties(chunk) AS chunk_properties
             WHERE ($document_kind IS NULL OR chunk.document_kind = $document_kind)
               AND ($derivative IS NULL OR chunk.derivative = $derivative)
-              AND ($region IS NULL OR chunk.market = $region OR chunk.region = $region)
+              AND ($region IS NULL OR chunk_properties.market = $region OR chunk_properties.region = $region)
               AND ($source_version IS NULL OR chunk.source_version = $source_version)
               AND (size($terms) = 0 OR any(term IN $terms
                    WHERE toLower(coalesce(chunk.original_text, '')) CONTAINS term))

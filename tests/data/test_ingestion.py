@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ import unittest
 from openpyxl import Workbook
 
 from services.ingestion import (
+    CONVERSION_VERSION,
     EXPECTED_FEEDBACK_COUNTS,
     _year,
     convert_feedback_workbook,
@@ -18,7 +20,7 @@ from services.ingestion import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_DATA_DIR = REPO_ROOT / "BMW-Data"
+REAL_DATA_DIR = Path(os.environ.get("BMW_DATA_DIR", REPO_ROOT / "BMW-Data")).resolve()
 
 
 def _save_workbook(path: Path, sheet_name: str, rows: list[tuple[object, ...]]) -> None:
@@ -54,6 +56,10 @@ class IngestionTests(unittest.TestCase):
             [annotation["feedback_type_original"] for annotation in bundle.feedback_annotations],
             ["Likes", "DTU"],
         )
+        self.assertTrue(all(annotation["vfc2_original"] == "Interior"
+                            for annotation in bundle.feedback_annotations))
+        self.assertTrue(all(annotation["vfc3_original"] == "Cabin comfort"
+                            for annotation in bundle.feedback_annotations))
         self.assertEqual(bundle.source_records[-1]["locator"]["row"], 3)
 
     def test_conflicting_duplicate_feedback_ids_are_not_merged(self) -> None:
@@ -124,19 +130,36 @@ class IngestionTests(unittest.TestCase):
             self.skipTest("private BMW-Data directory is not present")
 
         bundle = convert_sources(REAL_DATA_DIR, check_known_feedback_counts=True)
+        self.assertEqual(bundle.manifest["conversion_version"], CONVERSION_VERSION)
 
-        self.assertEqual(bundle.manifest["status"], "partial")
-        self.assertEqual(bundle.manifest["missing_document_kinds"], ["corporate_report"])
-        self.assertEqual(bundle.manifest["counts"]["source_files"], 8)
+        report_present = any(source.get("document_kind") == "corporate_report"
+                             for source in bundle.source_files)
+        self.assertEqual(bundle.manifest["status"], "succeeded" if report_present else "partial")
+        self.assertEqual(bundle.manifest["missing_document_kinds"],
+                         [] if report_present else ["corporate_report"])
+        self.assertEqual(bundle.manifest["counts"]["source_files"], len(discover_sources(REAL_DATA_DIR)))
         self.assertEqual(bundle.manifest["counts"]["feedback_comments"], 10_128)
-        self.assertEqual(bundle.manifest["counts"]["document_chunks"], 78)
+        self.assertEqual(bundle.manifest["counts"]["feedback_annotations"], 13_371)
+        self.assertTrue(any(annotation.get("vfc2_original") for annotation in bundle.feedback_annotations))
+        self.assertTrue(any(annotation.get("vfc3_original") for annotation in bundle.feedback_annotations))
+        self.assertEqual(sum(bool(annotation.get("vfc2_original"))
+                             for annotation in bundle.feedback_annotations), 13_371)
+        self.assertEqual(sum(bool(annotation.get("vfc3_original"))
+                             for annotation in bundle.feedback_annotations), 11_289)
+        if report_present:
+            report_chunks = [chunk for chunk in bundle.document_chunks
+                             if chunk.get("document_kind") == "corporate_report"]
+            self.assertTrue(report_chunks, "Corporate report was discovered but yielded no searchable text chunks")
+            self.assertTrue(all(chunk.get("page") for chunk in report_chunks))
+        else:
+            self.assertEqual(bundle.manifest["counts"]["document_chunks"], 78)
         self.assertEqual(
             {model: value["observed"] for model, value in bundle.manifest["known_feedback_counts"].items()},
             EXPECTED_FEEDBACK_COUNTS,
         )
         self.assertEqual(
             {issue["code"] for issue in bundle.issues if issue.get("severity") == "error"},
-            {"required_document_kind_missing"},
+            set() if report_present else {"required_document_kind_missing"},
         )
         self.assertFalse(any(source["filename"].startswith("~$") for source in bundle.source_files))
 

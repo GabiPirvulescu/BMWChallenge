@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import runpy
 import tempfile
@@ -10,7 +11,7 @@ from services.ingestion import convert_sources, write_bundle
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-REAL_DATA_DIR = REPO_ROOT / "BMW-Data"
+REAL_DATA_DIR = Path(os.environ.get("BMW_DATA_DIR", REPO_ROOT / "BMW-Data")).resolve()
 _loader = runpy.run_path(str(REPO_ROOT / "pipeline" / "01_load_neo4j.py"))
 load_processed_bundle = _loader["load_processed_bundle"]
 BundleError = _loader["BundleError"]
@@ -129,7 +130,10 @@ class LoaderTests(unittest.TestCase):
             self.skipTest("private BMW-Data directory is not present")
 
         bundle = convert_sources(REAL_DATA_DIR, check_known_feedback_counts=True)
-        self.assertEqual(bundle.manifest["status"], "partial")
+        self.assertEqual(
+            bundle.manifest["status"],
+            "succeeded" if not bundle.manifest["missing_document_kinds"] else "partial",
+        )
         with tempfile.TemporaryDirectory(dir=REPO_ROOT) as temp_dir:
             bundle_dir = Path(temp_dir) / "bundle"
             write_bundle(bundle, bundle_dir, REAL_DATA_DIR)
@@ -141,11 +145,12 @@ class LoaderTests(unittest.TestCase):
                 allow_partial=True,
             )
 
-        self.assertEqual(result["counts"]["source_files"], 8)
-        self.assertEqual(result["counts"]["source_records"], 14_870)
+        self.assertEqual(result["counts"]["source_files"], bundle.manifest["counts"]["source_files"])
+        self.assertEqual(result["counts"]["source_records"], bundle.manifest["counts"]["source_records"])
         self.assertEqual(result["counts"]["feedback_comments"], 10_128)
-        self.assertEqual(result["counts"]["facts"], 2_075)
-        self.assertEqual(result["counts"]["document_chunks"], 78)
+        self.assertEqual(result["counts"]["feedback_annotations"], 13_371)
+        self.assertEqual(result["counts"]["facts"], bundle.manifest["counts"]["facts"])
+        self.assertEqual(result["counts"]["document_chunks"], bundle.manifest["counts"]["document_chunks"])
         self.assertEqual(len(audit_events), 1)
         self.assertIs(audit_events[0][0], driver.session_value.tx)
 
