@@ -139,7 +139,7 @@ def _excel_module() -> Any:
     try:
         import openpyxl
     except ImportError as exc:  # pragma: no cover - depends on runtime install
-        raise ConversionError("Excel conversion requires openpyxl; install pipeline/requirements-data.txt") from exc
+        raise ConversionError("Excel conversion requires openpyxl; install requirements.txt") from exc
     return openpyxl
 
 
@@ -147,7 +147,7 @@ def _pdf_reader(path: Path) -> Any:
     try:
         from pypdf import PdfReader
     except ImportError as exc:  # pragma: no cover - depends on runtime install
-        raise ConversionError("PDF conversion requires pypdf; install pipeline/requirements-data.txt") from exc
+        raise ConversionError("PDF conversion requires pypdf; install requirements.txt") from exc
     return PdfReader(path)
 
 

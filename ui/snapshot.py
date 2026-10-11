@@ -1,9 +1,10 @@
 """
-Read-only client over the pipeline's own export (output/requirements_full.json).
+Read-only client over the complete backend export (BMW_OUTPUT_DIR/requirements.json).
 
 Use: show the real pipeline results when the API and Neo4j are not running.
-The file is the backend's output, so the UI still computes nothing. Records keep
-their legacy 0-10 scale and labels. Every write raises 501: decisions need the API.
+The file is the backend's output, so the UI still computes nothing. Both current
+v1 exports and historical requirements_full.json files retain their original
+policy and validation labels. Every write raises 501: decisions need the API.
 """
 from __future__ import annotations
 
@@ -17,14 +18,16 @@ from typing import Optional
 
 from ui.client import ApiError, normalize_detail, normalize_history, normalize_summary
 
-DEFAULT_PATH = Path(__file__).resolve().parent.parent / "output" / "requirements_full.json"
-
-
 def snapshot_path() -> Path:
-    return Path(os.environ.get("REQUIREMENTS_SNAPSHOT", str(DEFAULT_PATH)))
+    from config import get_settings, resolve_path
+
+    override = os.environ.get("REQUIREMENTS_SNAPSHOT")
+    if override:
+        return resolve_path(override)
+    return get_settings().output_dir / "requirements.json"
 
 
-def _flatten(record: dict) -> dict:
+def _flatten(record: dict) -> tuple[dict, dict]:
     """requirement + source_signal into the legacy API detail shape."""
     req = dict(record.get("requirement") or {})
     sig = record.get("source_signal") or {}
@@ -51,32 +54,45 @@ class SnapshotClient:
         if not self.path.exists():
             raise ApiError(404, f"No pipeline export at {self.path}. Run the pipeline export step "
                                 "(09_export_report.py) or set REQUIREMENTS_SNAPSHOT.", "snapshot_missing")
-        body = json.loads(self.path.read_text(encoding="utf-8"))
-        self.exported_at = body.get("exported_at")
+        try:
+            body = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ApiError(422, f"Cannot read the requirements snapshot at {self.path}: {exc}",
+                           "snapshot_invalid") from exc
+        if isinstance(body, list):
+            self._raw, self.exported_at = body, None
+        elif isinstance(body, dict) and isinstance(body.get("requirements"), list):
+            self._raw, self.exported_at = body["requirements"], body.get("exported_at")
+        else:
+            raise ApiError(422, "The snapshot must be a complete backend export or a legacy requirements file.",
+                           "snapshot_invalid")
         self.base_url = f"snapshot://{self.path.name}"
-        self._raw = body.get("requirements", [])
         self._details, self._summaries, self._history = {}, [], {}
         for rec in self._raw:
-            flat, sig = _flatten(rec)
-            rid = flat["req_id"]
+            if not isinstance(rec, dict):
+                raise ApiError(422, "The snapshot contains a requirement that is not an object.", "snapshot_invalid")
+            if "requirement" in rec:
+                flat, sig = _flatten(rec)
+            else:
+                flat, sig = rec, {}
+            rid = flat.get("id") or flat.get("req_id")
+            if not rid or rid in self._details:
+                raise ApiError(422, "The snapshot contains a missing or duplicate requirement ID.", "snapshot_invalid")
             d = normalize_detail(flat)
-            d["evidence"]["feedback_count"] = sig.get("feedback_count")
-            d["evidence"]["key_themes"] = sig.get("key_themes") or []
-            d["evidence"]["study_avg_score"] = sig.get("study_avg_score")
+            if sig:
+                d["evidence"]["feedback_count"] = sig.get("feedback_count")
+                d["evidence"]["key_themes"] = sig.get("key_themes") or []
+                d["evidence"]["study_avg_score"] = sig.get("study_avg_score")
             d["allowed_actions"] = []          # read-only: no server to decide
-            d["smart"]["notes"] = flat.get("smart_notes")
             self._details[rid] = d
             s = normalize_summary(flat)
-            s["evidence"]["feedback_count"] = sig.get("feedback_count")
-            s["kano"], s["moscow"] = flat.get("kano"), flat.get("moscow")
+            if sig:
+                s["evidence"]["feedback_count"] = sig.get("feedback_count")
+                s["kano"], s["moscow"] = flat.get("kano"), flat.get("moscow")
             s["data_gaps"] = len(flat.get("data_gaps") or [])
             self._summaries.append(s)
-            self._history[rid] = normalize_history(rec.get("history") or [], legacy=True)
-        # the export is already in pipeline order; rank by its own priority, ties by ID
-        self._summaries.sort(key=lambda s: (-(s["score"].get("effective") or 0), s["id"]))
-        for i, s in enumerate(self._summaries, 1):
-            s["rank"] = i
-            self._details[s["id"]]["rank"] = i
+            self._history[rid] = normalize_history(rec.get("history") or [], legacy=d.get("legacy", False))
+        self.legacy = bool(self._summaries) and all(r.get("legacy") for r in self._summaries)
         summary_file = self.path.with_name("summary_report.json")
         self._summary = json.loads(summary_file.read_text(encoding="utf-8")) if summary_file.exists() else {}
 
@@ -91,6 +107,9 @@ class SnapshotClient:
             rows = [r for r in rows if f["derivative"] in r["target_scope"].get("derivatives", [])]
         if f.get("status"):
             rows = [r for r in rows if r["status"] == f["status"]]
+        for key, scope_key in (("region", "regions"), ("powertrain", "powertrains")):
+            if f.get(key):
+                rows = [r for r in rows if f[key] in r["target_scope"].get(scope_key, [])]
         if f.get("evidence"):
             rows = [r for r in rows if (r["evidence"].get("level") or "") == f["evidence"]]
         if f.get("q"):
@@ -100,8 +119,11 @@ class SnapshotClient:
         for r in self._summaries:
             counts[r["status"]] = counts.get(r["status"], 0) + 1
         return {"items": copy.deepcopy(rows[offset:offset + limit]), "total": len(rows), "offset": offset,
-                "limit": limit, "legacy": True, "counts": counts,
-                "notice": None}
+                "limit": limit, "legacy": self.legacy, "counts": counts,
+                "notice": "Read-only export. Connect the live API for current ranking and complete audit history."}
+
+    def list_all_requirements(self, filters=None):
+        return self.list_requirements(filters, limit=max(1, len(self._summaries)))
 
     def get_requirement(self, rid):
         if rid not in self._details:
@@ -154,8 +176,9 @@ class SnapshotClient:
         w = None
         for rec in self._raw:
             row = {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (list, dict)) else v)
-                   for k, v in (rec.get("requirement") or {}).items()}
-            row["feedback_count"] = (rec.get("source_signal") or {}).get("feedback_count")
+                   for k, v in (rec.get("requirement") or rec).items()}
+            if "source_signal" in rec:
+                row["feedback_count"] = (rec.get("source_signal") or {}).get("feedback_count")
             if w is None:
                 cols = list(row)
                 w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore")

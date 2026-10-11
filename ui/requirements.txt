@@ -1,7 +1,0 @@
-# Role 4 PM workbench (pipeline/08_streamlit_ui.py, ui/). Install: pip install -r ui/requirements.txt
-streamlit>=1.40.0
-pandas>=2.2.0
-plotly>=5.24.0
-httpx>=0.27.0
-# tests (python -m pytest tests/frontend -q)
-pytest>=8.0

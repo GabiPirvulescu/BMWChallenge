@@ -7,7 +7,6 @@ non-exhaustive issue assignments. Their observed support is a lower bound.
 
 from collections import Counter
 from copy import deepcopy
-import hashlib
 import json
 
 from models import RequirementDraft

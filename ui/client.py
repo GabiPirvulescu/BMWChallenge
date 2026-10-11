@@ -2,7 +2,7 @@
 HTTP adapter between the Streamlit UI and Role 3's API.
 
 Rules this module enforces (Role 4 guide):
-- One place that knows the API origin (API_BASE_URL from the shared config, R09).
+- One place that knows API_BASE_URL and API_PREFIX from the shared config.
 - One normalisation layer: the UI only ever sees the planned contract shape
   (plan section 6), whether the server speaks the new /api contract or the
   legacy routes of pipeline/07_pm_review_api.py (gate vs gate_color etc.).
@@ -58,7 +58,7 @@ PM_ROLE = "PM_USER"   # every mutation from this UI is a named human PM
 
 # ----------------------------------------------------------------------------- configuration
 def resolve_base_url() -> str:
-    """API origin from the shared configuration (CONFIGURATION.md).
+    """API origin from the shared configuration (README.md#configuration).
 
     Order: config.API_BASE_URL, then the API_BASE_URL environment variable (so a PM can
     point at a teammate's server without editing files), then localhost:config.API_PORT.
@@ -77,6 +77,16 @@ def resolve_base_url() -> str:
         return url.rstrip("/")
     port = (getattr(cfg, "API_PORT", None) if cfg else None) or os.environ.get("API_PORT", "8000")
     return f"http://localhost:{int(port)}"
+
+
+def resolve_api_prefix() -> str:
+    """Use the same route prefix as the backend, including an explicitly empty prefix."""
+    try:
+        import config
+        prefix = getattr(config, "API_PREFIX", None)
+    except Exception:
+        prefix = None
+    return str(prefix if prefix is not None else os.environ.get("API_PREFIX", "/api"))
 
 
 # ----------------------------------------------------------------------------- errors
@@ -186,7 +196,8 @@ def normalize_summary(item: dict) -> dict:
     out["evidence"] = normalize_evidence(item.get("evidence") or {}, item.get("evidence_links"),
                                          item.get("source_snapshots"))
     out.setdefault("flags", [])
-    out["legacy"] = bool(item.get("legacy", False))
+    out["legacy"] = bool(item.get("legacy", False) or item.get("provenance_state") == "unresolved_legacy"
+                         or out["score"].get("scale", {}).get("policy") == "legacy-v0")
     return out
 
 
@@ -198,7 +209,8 @@ def normalize_detail(item: dict) -> dict:
         return out
     out = normalize_summary(item)
     # TODO(Role 3): RequirementDetail has no allowed_actions. Until it does, all five actions are
-    # offered and the server's 409/422 decides (docs/ROLE4_UI_NOTES.md, open requests).
+    # offered and the server's 409/422 decides.
+    out["actions_published"] = "allowed_actions" in item
     out.setdefault("allowed_actions", list(ACTION_LABELS))
     out["smart"] = normalize_smart(item.get("smart") or {})
     out["assumptions"] = [normalize_assumption(a) for a in item.get("assumptions") or []]
@@ -254,6 +266,7 @@ def normalize_evidence(ev: dict, links: Optional[list] = None, snapshots: Option
     if "value" not in ev and "policy_version" not in ev:   # fixture / legacy shape
         return dict(ev)
     rng = ev.get("range") or None
+    rows = source_rows(links or [], snapshots)
     return {"eci": _num(ev.get("value")), "level": ev.get("level"), "policy": ev.get("policy_version"),
             "components": dict(ev.get("components") or {}),
             "distinct_support_comments": ev.get("distinct_support_comments"),
@@ -262,17 +275,35 @@ def normalize_evidence(ev: dict, links: Optional[list] = None, snapshots: Option
             "unknown_components": list(ev.get("unknown_components") or []),
             "warnings": list(ev.get("warnings") or []),
             "is_probability": ev.get("is_probability", False),
-            "quotes": source_rows(links or [], snapshots)}
+            **{group: [row for row in rows if _source_group(row) == group]
+               for group in ("quotes", "facts", "documents")}}
+
+
+def _source_group(row: dict) -> str:
+    kind = row.get("kind") or ""
+    if kind in {"sales", "survey"} or kind.startswith("survey_"):
+        return "facts"
+    if kind in {"document", "corporate_report", "option_catalog"}:
+        return "documents"
+    return "quotes"
 
 
 def source_rows(links: list, snapshots: Optional[list] = None) -> list[dict]:
     """SourceReference list -> the quote rows the Evidence tab renders. Text only from the server."""
-    text = {s.get("record_id"): ((s.get("raw_payload") or {}).get("text")) for s in snapshots or []}
     rows = []
     for link in links:
         loc = link.get("locator") or {}
-        rows.append({"id": link.get("record_id"), "text": text.get(link.get("record_id")),
-                     "relation": link.get("relation"), "validation": link.get("validation_state"),
+        snapshot = next((s for s in snapshots or [] if all(
+            s.get(key) == link.get(key) for key in ("source_id", "record_id", "source_version", "locator"))), {})
+        source = snapshot.get("source_file") or {}
+        fact = snapshot.get("fact") or {}
+        value = fact.get("volume", fact.get("value", fact.get("distribution")))
+        if value is not None and fact.get("unit"):
+            value = f"{value} {fact['unit']}"
+        rows.append({"id": link.get("record_id"), "text": _snapshot_text(snapshot),
+                      "kind": source.get("kind"), "label": source.get("filename") or link.get("record_id"),
+                      "value": value,
+                      "relation": link.get("relation"), "validation": link.get("validation_state"),
                      "locator": " · ".join(f"{k} {v}" for k, v in loc.items()) or None,
                      "scope": f"claim: {link['claim_key']}" if link.get("claim_key") else None,
                      "source_id": link.get("source_id"), "source_version": link.get("source_version"),
@@ -280,12 +311,39 @@ def source_rows(links: list, snapshots: Optional[list] = None) -> list[dict]:
     return rows
 
 
+def _snapshot_text(snapshot: dict) -> Optional[str]:
+    """Decode original text from the native page/feedback-row snapshot, without paraphrasing it."""
+    chunk = snapshot.get("chunk") or {}
+    payload = snapshot.get("raw_payload") or {}
+    text = chunk.get("original_text") or chunk.get("text") or payload.get("text")
+    if isinstance(text, str):
+        return text
+    values = payload.get("values_by_header") or {
+        c.get("header"): c.get("value") for c in payload.get("columns") or [] if isinstance(c, dict)}
+    feedback_headers = {"customerfeedback", "feedback", "feedbacktext", "comment", "commenttext",
+                        "originaltext", "text", "verbatim"}
+    for header, value in values.items():
+        if "".join(ch for ch in str(header).casefold() if ch.isalnum()) in feedback_headers:
+            if isinstance(value, str):
+                return value
+    return None
+
+
 def fill_quote_text(ev: dict, req: dict) -> dict:
-    """The /evidence response has no source text; reuse the detail's server-sent snapshot text."""
-    known = {q.get("id"): q.get("text") for q in (req.get("evidence") or {}).get("quotes") or []}
-    for q in ev.get("quotes") or []:
-        if not q.get("text") and known.get(q.get("id")):
-            q["text"] = known[q["id"]]
+    """Reuse pinned detail snapshots and source types without mixing different versions/locators."""
+    groups = ("quotes", "facts", "documents")
+    identity = lambda row: tuple(row.get(k) for k in ("id", "source_id", "source_version", "locator", "scope"))
+    known = {identity(row): (group, row) for group in groups
+             for row in (req.get("evidence") or {}).get(group) or []}
+    result = {group: [] for group in groups}
+    for group in groups:
+        for row in ev.get(group) or []:
+            destination, saved = known.get(identity(row), (group, {}))
+            for key in ("text", "kind", "label", "value"):
+                if row.get(key) is None and saved.get(key) is not None:
+                    row[key] = saved[key]
+            result[destination].append(row)
+    ev.update(result)
     return ev
 
 
@@ -301,7 +359,9 @@ def normalize_evidence_response(body: dict) -> dict:
 def normalize_list(body, offset: int = 0, limit: int = 50) -> dict:
     """GET /requirements {items, total, offset, ranking_id}. ranking_id is kept for the freeze request."""
     body = body or {}
-    items = body.get("items", body if isinstance(body, list) else [])
+    if isinstance(body, list):
+        body = {"items": body, "total": len(body), "offset": offset}
+    items = body.get("items", [])
     return {"items": [normalize_summary(x) for x in items], "total": body.get("total"),
             "offset": body.get("offset", offset), "limit": limit, "legacy": False,
             "notice": body.get("notice"), "ranking_id": body.get("ranking_id"), "counts": body.get("counts")}
@@ -354,15 +414,17 @@ def normalize_source_record(body: dict) -> dict:
     if "values" in body and "file" in body:              # fixture shape
         return body
     loc = dict(body.get("locator") or {})
-    payload = body.get("raw_payload") or {}
+    payload = body.get("raw_payload") or (body.get("source_record") or {}).get("raw_payload") or {}
     if isinstance(payload.get("columns"), list):         # spreadsheet row: header/value pairs
         values = {c.get("header"): c.get("value") for c in payload["columns"] if isinstance(c, dict)}
     else:
         values = {k: v for k, v in payload.items() if not isinstance(v, (dict, list))}
-    if body.get("text") and "text" not in values:        # document chunk
-        values["text"] = body["text"]
-    return {"id": body.get("id"), "kind": body.get("document_kind") or "source record",
-            "file": loc.pop("filename", None) or body.get("source_file_id"),
+    text = body.get("original_text") or body.get("text")
+    if text:                                           # the exact chunk, rather than its entire parent page
+        values["text"] = text
+    return {"id": body.get("id"), "kind": body.get("document_kind") or body.get("kind") or "source record",
+            "file": loc.pop("filename", None) or (body.get("source_file") or {}).get("filename")
+                    or body.get("source_file_id"),
             "locator": {k: v for k, v in loc.items() if v is not None} or
                        ({"page": body["page"]} if body.get("page") is not None else {}),
             "values": values, "source_version": body.get("source_version")}
@@ -572,13 +634,15 @@ class ApiClient:
     timeout: float = 15.0
     mode: Optional[str] = None
     synthetic: bool = False
-    # Threads started from this session. The API has no "threads of a requirement" route, so
-    # read-only answers from other sessions cannot be listed (docs/ROLE4_UI_NOTES.md).
+    api_prefix: str = field(default_factory=resolve_api_prefix)
+    # Session threads are supplemented by the server's persisted review-thread audit events.
     _thread_ids: dict = field(default_factory=dict, repr=False)
 
     # -- transport -------------------------------------------------------------
     def _request(self, method: str, path: str, *, params=None, json_body=None, raw: bool = False):
-        url = f"{self.base_url}{path}"
+        if path == "/api" or path.startswith("/api/"):
+            path = self.api_prefix + path[4:]
+        url = f"{self.base_url.rstrip('/')}{path}"
         try:
             r = httpx.request(method, url, params=_clean(params), json=json_body, timeout=self.timeout)
         except httpx.HTTPError as e:
@@ -614,7 +678,9 @@ class ApiClient:
 
     # -- reads -----------------------------------------------------------------
     def health(self) -> dict:
-        return {"mode": self._detect(), "base_url": self.base_url}
+        mode = self._detect()
+        status = self._request("GET", "/api/health") if mode == "v1" else {}
+        return dict(status or {}, mode=mode, base_url=self.base_url)
 
     def list_requirements(self, filters: dict | None = None, offset: int = 0, limit: int = 50) -> dict:
         f = filters or {}
@@ -630,9 +696,40 @@ class ApiClient:
                     "notice": "Legacy API returns at most 200 rows and no total (repair R19 pending)."}
         params = {"status": f.get("status"), "derivative": f.get("derivative"), "region": f.get("region"),
                   "powertrain": f.get("powertrain"), "evidence_level": f.get("evidence"),
-                  "search": f.get("q"), "offset": offset, "limit": min(limit, 200)}
-        body = self._request("GET", "/api/requirements", params=params) or {}
+                  "search": f.get("q")}
+        body = self._paged("/api/requirements", params, offset, limit)
         return normalize_list(body, offset, limit)
+
+    def _paged(self, path: str, params: dict, offset: int, limit: Optional[int]) -> dict:
+        """Combine server pages without exceeding its 200-row request limit.
+
+        A ranking change between pages is an error, not a mixed-revision package selection.
+        """
+        items, first = [], None
+        while limit is None or len(items) < limit:
+            page_limit = min(200, limit - len(items)) if limit is not None else 200
+            body = self._request("GET", path, params=dict(params, offset=offset + len(items), limit=page_limit)) or {}
+            if first is None:
+                first = body
+            elif body.get("ranking_id") != first.get("ranking_id"):
+                raise ApiError(409, "The ranking changed while loading pages. Refresh and review again.",
+                               "stale_ranking")
+            rows = body.get("items") or []
+            items.extend(rows)
+            total = body.get("total")
+            if not rows or len(rows) < page_limit or (total is not None and offset + len(items) >= total):
+                break
+        return dict(first or {}, items=items, offset=offset)
+
+    def list_all_requirements(self, filters: dict | None = None) -> dict:
+        """Read the full portfolio for overview/package selection; exports still use their own endpoint."""
+        if self.legacy:
+            return self.list_requirements(filters, limit=200)
+        f = filters or {}
+        params = {"status": f.get("status"), "derivative": f.get("derivative"), "region": f.get("region"),
+                  "powertrain": f.get("powertrain"), "evidence_level": f.get("evidence"), "search": f.get("q")}
+        body = self._paged("/api/requirements", params, 0, None)
+        return normalize_list(body, 0, len(body["items"]))
 
     def get_requirement(self, rid: str) -> dict:
         if self.legacy:
@@ -650,13 +747,18 @@ class ApiClient:
         return normalize_history(self._request("GET", f"/api/requirements/{rid}/history") or {}, legacy=False)
 
     def get_thread(self, rid: str) -> dict:
-        """Threads known for this requirement (from its proposals and this session's challenges)."""
+        """Recover persisted threads, including read-only answers made in other sessions."""
         if self.legacy:
             return {"turns": [], "unavailable": "The legacy API has no review assistant."}
-        proposals = (self._request("GET", f"/api/requirements/{rid}/proposals", params={"limit": 200})
-                     or {}).get("items") or []
+        proposals = self._paged(f"/api/requirements/{rid}/proposals", {}, 0, None)["items"]
+        history = self._request("GET", f"/api/requirements/{rid}/history") or {}
+        persisted_ids = [(e.get("after") or {}).get("id") for e in history.get("events") or []
+                         if e.get("action") == "REVIEW_THREAD_CREATED"
+                         and isinstance(e.get("after"), dict)
+                         and e["after"].get("entity_kind") == "requirement"
+                         and e["after"].get("entity_id") == rid]
         ids = list(dict.fromkeys([p["thread_id"] for p in proposals if p.get("thread_id")]
-                                 + self._thread_ids.get(rid, [])))
+                                 + [tid for tid in persisted_ids if tid] + self._thread_ids.get(rid, [])))
         merged = {"id": None, "turns": []}
         for tid in ids:
             t = normalize_thread(self._request("GET", f"/api/review-threads/{tid}") or {}, None, rid)
@@ -669,7 +771,8 @@ class ApiClient:
     def get_source_record(self, record_id: str) -> dict:
         self._require_v1("Source records")
         # Role 1 IDs: SR-… (source records), DOC-… (document chunks)
-        kind = "document-chunks" if record_id.upper().startswith(("DOC-", "CHUNK")) else "source-records"
+        kind = ("document-chunks" if record_id.upper().startswith(("DOC-", "CHUNK")) else
+                "facts" if record_id.upper().startswith("FACT-") else "source-records")
         return normalize_source_record(self._request("GET", f"/api/{kind}/{record_id}") or {})
 
     def list_sources(self) -> dict:
@@ -680,7 +783,7 @@ class ApiClient:
         if self.legacy:
             return self._request("GET", "/dashboard/summary") or {}
         try:
-            return self._request("GET", "/api/summary") or {}
+            return self._request("GET", "/api/dashboard/summary") or {}
         except ApiError as e:
             if e.status == 404:
                 return {}
@@ -721,7 +824,7 @@ class ApiClient:
                                                        question=question)) or {}
         if run.get("thread_id"):
             self._thread_ids.setdefault(rid, []).append(run["thread_id"])
-        return run
+        return normalize_run(run)
 
     def apply_suggestion(self, rid: str, turn_id: str, expected_revision: int, accepted_patch: dict,
                          actor_id: str, rationale: str) -> dict:

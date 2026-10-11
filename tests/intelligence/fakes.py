@@ -1,7 +1,5 @@
 """Synthetic providers and fixed model responses. No external accounts or graph required."""
 from copy import deepcopy
-import json
-from pathlib import Path
 
 from contracts.intelligence import (
     DocumentPassage, FeedbackComment, Locator, NativeFact, ReviewContext, Scope,

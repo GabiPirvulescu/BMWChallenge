@@ -37,6 +37,8 @@ CHUNK = {"id": "DOC-9", "source_file_id": "SRC-cd34", "source_record_id": "SR-PD
 
 
 def routes(method, path):
+    if method == "GET" and path == "/api/health":
+        return {"status": "ok", "engine_available": True}
     if method == "GET" and path == "/api/requirements":
         return FX["list_example"]
     if path == f"/api/requirements/{RID}":

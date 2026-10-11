@@ -80,7 +80,7 @@ try:
     from neo4j import GraphDatabase
     import uvicorn
 except ImportError as exc:
-    raise SystemExit(f"Backend dependencies unavailable: {exc}; install requirements.txt with requirements.lock.txt")
+    raise SystemExit(f"Backend dependencies unavailable: {exc}; install requirements.txt")
 
 # Check connectivity and the selected database before converting or writing inputs.
 driver = None

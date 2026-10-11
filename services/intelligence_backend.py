@@ -2,7 +2,6 @@
 
 from copy import deepcopy
 from datetime import date
-from pathlib import Path
 from uuid import uuid4
 import json
 
@@ -10,7 +9,7 @@ from openpyxl.utils import get_column_letter
 
 from config import get_settings
 from contracts.intelligence import (Scope, Locator, SourceReference, FeedbackComment, TopicBucket,
-    NativeFact, StudyContext, DocumentPassage, Signal, ReviewContext, RequirementDraft as AIDraft,
+    NativeFact, StudyContext, DocumentPassage, Signal, ReviewContext,
     PatchOperation)
 from models import RequirementDraft as BackendDraft
 from services.analysis import derivation_key

@@ -13,8 +13,8 @@ Run on Role 3's own contract examples (contracts/fixture_case.json, synthetic):
     streamlit run pipeline/08_streamlit_ui.py -- --mock
 
 Design: Apple Human Interface Guidelines adapted to the web (system font stack,
-inset grouped lists, segmented controls, sheets, one accent colour). See
-docs/ROLE4_UI_NOTES.md.
+inset grouped lists, segmented controls, sheets, one accent colour). Startup
+instructions are in README.md.
 """
 from __future__ import annotations
 
@@ -39,9 +39,12 @@ st.set_page_config(page_title="ConceptCraft · Requirement Workbench", page_icon
 st.markdown(css(), unsafe_allow_html=True)
 
 PAGE_SIZE = 50
+VEHICLES = ["F70", "G60", "G68", "G70"]
+POWERTRAINS = ["BEV", "ICE", "PHEV", "HEV", "MHEV"]
 ACTORS = ["pm-demo-1 · PM", "pm-demo-2 · PM"]
 STAGES = ["import_check", "consolidate", "retrieve", "draft", "validate", "score", "completed"]
 STATUS_FILTER = ["All", "DRAFT", "PM_REVIEW", "APPROVED", "REJECTED", "POSTPONED"]
+TERMINAL_RUN_STATES = {"succeeded", "partial", "failed"}
 
 
 # ============================================================================ session helpers
@@ -97,7 +100,11 @@ def switch_source():
         st.session_state.pop("_source_error", None)
     except ApiError as err:
         st.session_state["_source_error"] = err.message
-    for k in ("selected", "req_table"):
+        return
+    for k in list(st.session_state):
+        if k.startswith(("export:", "review_run:", "finished_run:")):
+            st.session_state.pop(k, None)
+    for k in ("selected", "req_table", "run_id", "run_done", "freeze_id", "pages", "_filter_sig"):
         st.session_state.pop(k, None)
 
 
@@ -164,33 +171,36 @@ def decision_sheet(req: dict, action: str):
          f'{c.e(req["title"])}</div>')
 
     reviewed, accepted, sources = [], [], []
+    review_key = f"{req['id']}:{req.get('revision')}"
     if action == "approve":
         # Every target, source and unresolved assumption is listed; the server checks completeness.
         targets = [t for t in (req.get("smart") or {}).get("targets", []) if t.get("id")]
         if targets:
             html(c.section("SMART targets"))
             for t in targets:
-                if st.checkbox(f"I reviewed {t['id']}: {c.target_text(t)}", key=f"rv:{req['id']}:{t['id']}",
+                if st.checkbox(f"I reviewed {t['id']}: {c.target_text(t)}", key=f"rv:{review_key}:{t['id']}",
                                value=t.get("review_state") == "reviewed"):
                     reviewed.append(t["id"])
-        refs = list(dict.fromkeys(q["source_record_id"] for q in req.get("evidence", {}).get("quotes") or []
-                                  if q.get("source_record_id")))
+        refs = list(dict.fromkeys(
+            [link["record_id"] for link in req.get("evidence_links") or [] if link.get("record_id")]
+            + [row["source_record_id"] for group in ("quotes", "facts", "documents")
+               for row in req.get("evidence", {}).get(group) or [] if row.get("source_record_id")]))
         if refs:
             html(c.section("Evidence sources"))
             for ref in refs:
-                if st.checkbox(f"I reviewed source {ref}", key=f"src_rv:{req['id']}:{ref}"):
+                if st.checkbox(f"I reviewed source {ref}", key=f"src_rv:{review_key}:{ref}"):
                     sources.append(ref)
         unresolved = [a for a in req.get("assumptions", []) if a.get("state") in ("open", "accepted")]
         if unresolved:
             html(c.section("Assumptions"))
             for a in unresolved:
-                if st.checkbox(f"Accept {a['id']}: {a['text']}", key=f"acc:{req['id']}:{a['id']}",
+                if st.checkbox(f"Accept {a['id']}: {a['text']}", key=f"acc:{review_key}:{a['id']}",
                                value=a.get("state") == "accepted"):
                     accepted.append(a["id"])
 
     scale = req.get("score", {}).get("scale", {})
     with st.expander("Score override", expanded=False):
-        st.caption("Off means the calculated score stays in force. On sends your value, including 0. "
+        st.caption("Off leaves the current effective score unchanged. On sends your value, including 0. "
                    "The calculated score is kept beside it.")
         override_enabled = st.toggle("Override the calculated priority", key=f"ovr_on:{req['id']}")
         override_value = st.number_input(
@@ -351,8 +361,9 @@ def sidebar(client):
                           "amber"))
         elif getattr(client, "snapshot", False):
             html(c.pill("Pipeline snapshot · read-only", "blue", dot=True)
-                 + f'<div class="cc-caption" style="margin-top:6px">Exported {c.e(c.fmt_time(client.exported_at))}'
-                   '. Start the API to record decisions.</div>')
+                 + f'<div class="cc-caption" style="margin-top:6px">{c.e(client.path.name)}'
+                   f'{" · " + c.e(c.fmt_time(client.exported_at)) if client.exported_at else ""}'
+                    '. Start the API to record decisions.</div>')
         else:
             try:
                 mode = client.health()["mode"]
@@ -363,8 +374,8 @@ def sidebar(client):
                 html(c.pill("API unreachable", "red", dot=True)
                      + f'<div class="cc-caption" style="margin-top:6px">{c.e(err.message)}</div>')
                 st.button("Open pipeline snapshot", width="stretch",
-                          on_click=lambda: (st.session_state.update(source_choice="snapshot"), switch_source()),
-                          help="Read-only view of the pipeline's last export (output/requirements_full.json).")
+                           on_click=lambda: (st.session_state.update(source_choice="snapshot"), switch_source()),
+                           help="Read-only view of the full backend export in BMW_OUTPUT_DIR.")
                 st.button("Use synthetic preview", on_click=use_fixtures, width="stretch",
                           help="Explicitly switch to labelled synthetic data. Nothing is mixed with live data.")
         if st.button("Refresh", icon=":material/refresh:", width="stretch"):
@@ -404,13 +415,13 @@ def requirements_page(client):
     f1, f2, f3, f4, f5 = st.columns([2.6, 1.3, 1.3, 1.3, 1.3])
     filters = {
         "q": f1.text_input("Search", placeholder="Search title or ID", label_visibility="collapsed"),
-        "derivative": f2.selectbox("Vehicle", ["All", "G60", "G68", "F70"], label_visibility="collapsed",
+        "derivative": f2.selectbox("Vehicle", ["All", *VEHICLES], label_visibility="collapsed",
                                    format_func=lambda v: "All vehicles" if v == "All" else v),
         "region": f3.selectbox("Region", ["All", "EU", "US", "CN", "RoW"], label_visibility="collapsed",
                                format_func=lambda v: "All regions" if v == "All" else v),
-        "powertrain": f4.selectbox("Powertrain", ["All", "BEV", "ICE", "PHEV"], label_visibility="collapsed",
+        "powertrain": f4.selectbox("Powertrain", ["All", *POWERTRAINS], label_visibility="collapsed",
                                    format_func=lambda v: "All powertrains" if v == "All" else v),
-        "evidence": f5.selectbox("Evidence", ["All", "High", "Strong", "Moderate", "Low"], label_visibility="collapsed",
+        "evidence": f5.selectbox("Evidence", ["All", "High", "Strong", "Moderate", "Low", "Weak"], label_visibility="collapsed",
                                  format_func=lambda v: "Any evidence" if v == "All" else f"{v} evidence"),
     }
     st.session_state.setdefault("status_filter", "All")
@@ -535,7 +546,9 @@ def workbench(client, rid: str):
     if getattr(client, "snapshot", False):
         html(c.banner("<b>Read-only snapshot.</b> Start the API to approve, reject or defer this requirement.",
                       "blue"))
-    # Only the actions the server allows for this revision are offered.
+    # Prefer the server's allowed actions; older v1 servers validate actions on submission.
+    if not req.get("legacy") and not getattr(client, "snapshot", False) and not req.get("actions_published", True):
+        st.caption("Decisions are validated by the backend for the current revision.")
     actions = [a for a in ACTION_LABELS if a in req.get("allowed_actions", [])]
     widths = [len(ACTION_LABELS[x]) + 6 for x in actions] + [10, 19]
     cols = st.columns(widths + [max(10, 110 - sum(widths))])
@@ -544,9 +557,10 @@ def workbench(client, rid: str):
                           type="primary" if action == "approve" else "secondary"):
             decision_sheet(req, action)
     cols = cols[len(actions):]
-    if cols[0].button("Edit", width="stretch", disabled=bool(req.get("legacy"))):
+    read_only = bool(req.get("legacy") or getattr(client, "snapshot", False))
+    if cols[0].button("Edit", width="stretch", disabled=read_only):
         edit_sheet(req)
-    cols[1].button("Ask assistant", width="stretch", disabled=bool(req.get("legacy")),
+    cols[1].button("Ask assistant", width="stretch", disabled=read_only,
                     on_click=lambda: st.session_state.update({f"tab:{rid}": "Assistant"}))
 
     st.session_state.setdefault(f"tab:{rid}", "Requirement")
@@ -562,8 +576,22 @@ def tab_requirement(client, req):
     with left:
         html(c.section("Description"))
         html(f'<div class="cc-card"><div class="cc-body">{c.e(req.get("description") or "—")}</div>'
-             + (f'<div class="cc-footnote" style="margin-top:8px">Problem: {c.e(req["problem_statement"])}</div>'
-                if req.get("problem_statement") else "") + "</div>")
+              + (f'<div class="cc-footnote" style="margin-top:8px">Problem: {c.e(req["problem_statement"])}</div>'
+                 if req.get("problem_statement") else "") + "</div>")
+        if req.get("jtbd"):
+            html(c.section("Job to be done"))
+            html(c.group([(c.e(req["jtbd"]), "", "")]))
+        if req.get("claims"):
+            html(c.section("Claims and provenance"))
+            for claim in req["claims"]:
+                refs = ", ".join(str(ref) for ref in claim.get("evidence_ids") or [])
+                meta = " · ".join(str(value) for value in (claim.get("id"), claim.get("kind"), refs) if value)
+                html(c.group([(c.e(claim.get("text")), c.e(meta),
+                               c.lookup_pill(c.PROVENANCE, claim.get("provenance")) + " "
+                               + c.lookup_pill(c.REVIEW, claim.get("review_state")))]))
+        if req.get("alternatives"):
+            html(c.section("Alternatives considered"))
+            html(c.group([(c.e(option), "", "") for option in req["alternatives"]]))
         html(c.section("SMART"))
         rows = []
         if smart.get("specific"):
@@ -708,19 +736,23 @@ def tab_evidence(client, req):
         if not quotes:
             html(c.banner("<b>No customer comments support this requirement.</b> Treat any score as provisional.",
                           "amber"))
-        for q in quotes:
+        for index, q in enumerate(quotes):
             html(c.quote_rows([q]))
             if q.get("source_record_id"):
-                if st.button(f"Open {q['id']}", key=f"src:{q['source_record_id']}"):
+                if st.button(f"Open {q['id']}", key=f"src:{q['source_record_id']}:{index}"):
                     source_sheet(q["source_record_id"])
-        for title, key in (("Study facts", "facts"), ("Documents", "documents")):
+        for title, key in (("Source facts (native values)", "facts"), ("Documents", "documents")):
             items = ev.get(key) or []
             if items:
                 html(c.section(title))
-                for it in items:
-                    html(c.group([(c.e(it.get("label")), c.e(it.get("value") or it.get("id")),
-                                   c.lookup_pill(c.RELATION, it.get("relation")))]))
-                    if it.get("source_record_id") and st.button(f"Open {it['id']}", key=f"src:{it['id']}"):
+                for index, it in enumerate(items):
+                    if key == "documents":
+                        html(c.quote_rows([it]))
+                    else:
+                        value = it.get("value") if it.get("value") is not None else it.get("id")
+                        html(c.group([(c.e(it.get("label")), c.e(value),
+                                       c.lookup_pill(c.RELATION, it.get("relation")))]))
+                    if it.get("source_record_id") and st.button(f"Open {it['id']}", key=f"src:{key}:{it['id']}:{index}"):
                         source_sheet(it["source_record_id"])
 
 
@@ -728,6 +760,9 @@ def tab_assistant(client, req):
     if req.get("legacy"):
         html(c.banner("The review assistant needs the new /api contract.", "neutral"))
         return
+    run_key = f"review_run:{req['id']}"
+    review_run = st.session_state.get(run_key)
+    active = run_status(client, review_run) if review_run else False
     thread = safe(client.get_thread, req["id"], what="load the review thread")
     if thread is None:
         return
@@ -762,15 +797,17 @@ def tab_assistant(client, req):
         if b.button("Discard", key=f"discard:{t['id']}"):
             discard_sheet(thread.get("id"), t, req)
 
-    with st.form(f"ask:{req['id']}", clear_on_submit=True):
+    with st.form(f"ask:{req['id']}", clear_on_submit=False):
         q = st.text_area("Ask the review assistant", placeholder="e.g. Does the evidence support EU as a target?")
-        if st.form_submit_button("Ask", type="primary"):
+        if st.form_submit_button("Ask", type="primary", disabled=bool(active)):
             if not q.strip():
                 st.warning("Type a question first.")
             else:
                 try:
                     with st.spinner("Asking…"):
-                        client.challenge(req["id"], q, req.get("revision"), actor_id())
+                        result = client.challenge(req["id"], q, req.get("revision"), actor_id())
+                    if result.get("run_id") or result.get("id"):
+                        st.session_state[run_key] = result.get("run_id") or result["id"]
                     st.rerun()
                 except ApiError as err:
                     show_error(err, "ask the assistant")
@@ -807,7 +844,7 @@ def sources_page(client):
         meta = " · ".join(x for x in [f.get("kind"), counts, f"version {f['version']}" if f.get("version") else ""] if x)
         rows.append((c.e(f.get("file")), c.e(meta) +
                      "".join(f"<br><span style='color:var(--amber)'>{c.e(i)}</span>" for i in issues),
-                     c.pill("Issues", "amber") if issues else c.pill("OK", "green")))
+                      c.pill("Issues", "amber") if issues else c.pill("No issues reported", "neutral")))
     html(c.section("Files"))
     html(c.group(rows) or c.banner("No source files reported.", "neutral"))
     if data.get("coverage"):
@@ -830,17 +867,48 @@ def analysis_page(client):
         active = run_status(client, run_id)
     with st.form("run"):
         a, b, cc_ = st.columns(3)
-        derivs = a.multiselect("Vehicles", ["G60", "G68", "F70"], ["G60"])
+        derivs = a.multiselect("Vehicles", VEHICLES, ["G60"])
         regions = b.multiselect("Regions", ["EU", "US", "CN", "RoW"], ["EU", "US", "CN"])
-        max_drafts = cc_.number_input("Max drafts", 1, 50, 10)
+        max_drafts = cc_.number_input("Max drafts", 1, 18, 10)
+        powertrains = st.multiselect("Powertrains", POWERTRAINS, ["BEV"])
+        query = st.text_input("Feedback search", placeholder="e.g. temperature")
+        topic_lines = st.text_area("Exact topics (one per line, optional)", height=68,
+                                   placeholder="Air conditioning, setting",
+                                   help="Use the native topic names; commas within a name are preserved.")
         refresh = st.toggle("Call the model again (otherwise reuse cached results)")
         if st.form_submit_button("Start analysis", type="primary", disabled=bool(active)):
             try:
-                res = client.start_analysis({"derivatives": derivs, "regions": regions}, int(max_drafts), refresh)
+                scope = {"derivatives": derivs, "regions": regions, "powertrains": powertrains}
+                if query.strip():
+                    scope["query"] = query.strip()
+                selected_topics = [t.strip() for t in topic_lines.splitlines() if t.strip()]
+                if selected_topics:
+                    scope["topics"] = selected_topics
+                res = client.start_analysis(scope, int(max_drafts), refresh)
                 st.session_state["run_id"] = res["run_id"]
                 st.rerun()
             except ApiError as err:
                 show_error(err, "start the analysis")
+
+
+def render_run(run_id, run):
+    prog = run.get("progress") or {}
+    done = (f'{prog["fraction"]:.0%} done · {prog.get("done")} drafts so far' if prog.get("fraction") is not None
+            else f'{c.e(prog.get("done"))} of {c.e(prog.get("total"))} drafts')
+    stages = ["retrieve", "review", "completed"] if run.get("kind") == "challenge" else STAGES
+    html(f'<div class="cc-card"><div class="cc-headline">{c.e(run_id)} · {c.e(run.get("state"))}</div>'
+         f'{c.steps(stages, run.get("stage"), run.get("state"))}'
+         f'<div class="cc-footnote" style="margin-top:8px">{c.e(run.get("mode") or "")} · {done}</div></div>')
+    st.caption(f"Stage: {run.get('stage') or 'not reported'}")
+    for fail in run.get("failures") or []:
+        html(c.banner(c.e(fail), "red"))
+    state = run.get("state")
+    if state in TERMINAL_RUN_STATES:
+        tone = {"succeeded": "green", "partial": "amber", "failed": "red"}[state]
+        html(c.banner(f"{c.e(run_id)} · {c.e(state)}"
+                      + (" · cached result" if run.get("mode") == "cached" else ""), tone))
+        if run.get("result_ids"):
+            st.caption("Results: " + ", ".join(run["result_ids"]))
 
 
 @st.fragment(run_every=2)
@@ -848,28 +916,16 @@ def _run_fragment(client, run_id):
     run = safe(client.get_run, run_id, what="load the run")
     if run is None:
         return
-    prog = run.get("progress") or {}
-    done = (f'{prog["fraction"]:.0%} done · {prog.get("done")} drafts so far' if prog.get("fraction") is not None
-            else f'{c.e(prog.get("done"))} of {c.e(prog.get("total"))} drafts')
-    html(f'<div class="cc-card"><div class="cc-headline">{c.e(run_id)} · {c.e(run.get("state"))}</div>'
-         f'{c.steps(STAGES, run.get("stage"), run.get("state"))}'
-         f'<div class="cc-footnote" style="margin-top:8px">{c.e(run.get("mode") or "")} · {done}</div></div>')
-    for fail in run.get("failures") or []:
-        html(c.banner(c.e(fail), "red"))
-    if run.get("state") in ("succeeded", "partial", "failed"):
-        if run.get("result_ids"):
-            st.caption("New or updated: " + ", ".join(run["result_ids"]))
-        st.session_state["run_done"] = True
+    render_run(run_id, run)
+    if run.get("state") in TERMINAL_RUN_STATES:
+        st.session_state[f"finished_run:{run_id}"] = run
         st.rerun(scope="app")
 
 
 def run_status(client, run_id) -> bool:
-    if st.session_state.get("run_done"):
-        html(c.banner(f"{c.e(run_id)} finished. Open Requirements to review the drafts.", "green"))
-        if st.button("Clear"):
-            for k in ("run_id", "run_done"):
-                st.session_state.pop(k, None)
-            st.rerun()
+    finished = st.session_state.get(f"finished_run:{run_id}")
+    if finished is not None:
+        render_run(run_id, finished)
         return False
     _run_fragment(client, run_id)
     return True
@@ -878,7 +934,7 @@ def run_status(client, run_id) -> bool:
 def package_page(client):
     html('<div class="cc-largetitle">Review package</div><div class="cc-subhead">Freeze approved revisions '
          'into an auditable package.</div>')
-    page = safe(client.list_requirements, {"status": "APPROVED"}, 0, 200, what="load approved requirements")
+    page = safe(client.list_all_requirements, {"status": "APPROVED"}, what="load approved requirements")
     if page is None:
         return
     approved = page["items"]

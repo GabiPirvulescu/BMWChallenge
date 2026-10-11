@@ -130,6 +130,9 @@ class ContractMockClient:
         self.calls.append(("get_requirement", rid))
         return normalize_detail(dict(copy.deepcopy(self._get(rid)), rank=self.ranks.get(rid)))
 
+    def list_all_requirements(self, filters=None):
+        return self.list_requirements(filters, limit=max(1, len(self.reqs)))
+
     def get_evidence(self, rid):
         record = self._get(rid)
         body = copy.deepcopy(self.fx["evidence_example"])

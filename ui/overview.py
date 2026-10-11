@@ -49,7 +49,7 @@ def _vehicle(r: dict) -> str:
 
 def render_overview(client, open_requirement):
     try:
-        page = client.list_requirements({}, 0, 1000)
+        page = client.list_all_requirements()
     except ApiError as err:
         _html(c.banner(f"<b>Could not load requirements.</b> {c.e(err.message)} This is not an empty "
                        "portfolio; the data was not loaded.", "red"))
@@ -71,7 +71,6 @@ def render_overview(client, open_requirement):
         _html(c.banner("The request succeeded and returned no requirements.", "neutral"))
         return
 
-    legacy = any(r.get("legacy") for r in items)
     status = Counter(r["status"] for r in items)
     conflicts = sum(1 for r in items if r.get("has_conflict"))
     gaps = sum(1 for r in items if r.get("data_gaps") or "evidence_gap" in r.get("flags", []))
@@ -91,11 +90,14 @@ def render_overview(client, open_requirement):
     vcolor = {v: VEHICLE_COLORS[i] if i < len(VEHICLE_COLORS) else "#8E8E93" for i, v in enumerate(vehicles)}
     rows = [{"id": r["id"], "title": r["title"], "vehicle": _vehicle(r), "topic": r.get("topic") or "Other",
              "priority": r["score"].get("effective"), "feedback": r["evidence"].get("feedback_count"),
-             "eci": r["evidence"].get("eci"), "level": r["evidence"].get("level") or "Unknown",
-             "status": STATUS_LABELS.get(r["status"], r["status"]), "conflict": bool(r.get("has_conflict"))}
-            for r in items]
+              "eci": r["evidence"].get("eci"), "level": r["evidence"].get("level") or "Unknown",
+              "policy": r["score"].get("scale", {}).get("policy", "unknown"),
+              "scale_label": r["score"].get("scale", {}).get("label", "Priority"),
+              "scale_max": r["score"].get("scale", {}).get("max", 100),
+              "scale_min": r["score"].get("scale", {}).get("min", 0),
+              "status": STATUS_LABELS.get(r["status"], r["status"]), "conflict": bool(r.get("has_conflict"))}
+             for r in items]
     df = pd.DataFrame(rows)
-    scale_max = 10 if legacy else 100
 
     left, right = st.columns([3, 2], gap="medium")
     with left:
@@ -104,24 +106,29 @@ def render_overview(client, open_requirement):
         xlabel = "Customer comments behind the requirement (log scale)" if use_feedback else "Evidence confidence (ECI)"
         _html(f'<div class="cc-chart-title">Priority vs evidence</div><div class="cc-chart-sub">Top right: high '
               f'priority with broad customer backing. Top left: important but thinly evidenced, validate first.</div>')
-        fig = go.Figure()
-        for v in vehicles:
-            sub = df[(df.vehicle == v) & df[xcol].notna() & df.priority.notna()]
-            fig.add_trace(go.Scatter(
-                x=sub[xcol], y=sub["priority"], mode="markers", name=v,
-                marker=dict(size=9, color=vcolor[v], opacity=0.85, line=dict(width=1.5, color="white"),
-                            symbol=["diamond" if k else "circle" for k in sub["conflict"]]),
-                customdata=sub[["id", "title", "level", "status"]].values,
-                hovertemplate="<b>%{customdata[1]}</b><br>%{customdata[0]} · " + v +
-                              "<br>Priority %{y:.2f}<br>" + ("Comments %{x}" if use_feedback else "ECI %{x:.0f}") +
-                              "<br>%{customdata[2]} evidence · %{customdata[3]}<extra></extra>"))
-        _layout(fig, 380, xaxis_title=xlabel, yaxis_title=f"Priority (0–{scale_max})")
-        if use_feedback:
-            fig.update_xaxes(type="log", tickvals=[1, 3, 10, 30, 100, 300, 1000],
-                             ticktext=["1", "3", "10", "30", "100", "300", "1k"])
-        st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
-        st.caption("Diamonds mark requirements with conflicting evidence."
-                   + (" Legacy 0–10 scores." if legacy else ""))
+        if df["policy"].nunique() > 1:
+            st.caption("Different scoring policies are plotted separately; legacy and v1 priorities are not comparable.")
+        for policy, portfolio in df.groupby("policy", sort=False):
+            fig = go.Figure()
+            for v in vehicles:
+                sub = portfolio[(portfolio.vehicle == v) & portfolio[xcol].notna() & portfolio.priority.notna()]
+                fig.add_trace(go.Scatter(
+                    x=sub[xcol], y=sub["priority"], mode="markers", name=v,
+                    marker=dict(size=9, color=vcolor[v], opacity=0.85, line=dict(width=1.5, color="white"),
+                                symbol=["diamond" if k else "circle" for k in sub["conflict"]]),
+                    customdata=sub[["id", "title", "level", "status"]].values,
+                    hovertemplate="<b>%{customdata[1]}</b><br>%{customdata[0]} · " + v +
+                                  "<br>Priority %{y:.2f} (" + c.e(policy) + ")<br>" +
+                                  ("Comments %{x}" if use_feedback else "ECI %{x:.0f}") +
+                                  "<br>%{customdata[2]} evidence · %{customdata[3]}<extra></extra>"))
+            label = portfolio.iloc[0]["scale_label"]
+            _layout(fig, 380, xaxis_title=xlabel, yaxis_title=label)
+            fig.update_yaxes(range=[portfolio.iloc[0]["scale_min"], portfolio.iloc[0]["scale_max"]])
+            if use_feedback:
+                fig.update_xaxes(type="log", tickvals=[1, 3, 10, 30, 100, 300, 1000],
+                                 ticktext=["1", "3", "10", "30", "100", "300", "1k"])
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False}, key=f"priority:{policy}")
+            st.caption(f"{label}. Diamonds mark requirements with conflicting evidence.")
     with right:
         has_fb = df["feedback"].notna().any()
         tdf = df[~df["topic"].str.lower().isin(["no_class_found", "other", "unknown", ""])]
@@ -139,7 +146,8 @@ def render_overview(client, open_requirement):
                                 cliponaxis=False, textfont=dict(color="#6E6E73", size=11),
                                 hovertemplate="%{customdata}: %{x} " + unit + "<extra></extra>"))
         _layout(fig2, 380, showlegend=False, bargap=0.35)
-        fig2.update_xaxes(showgrid=False, showticklabels=False, range=[0, float(topics.max()) * 1.18])
+        fig2.update_xaxes(showgrid=False, showticklabels=False,
+                         range=[0, max(1, float(topics.max()) if not topics.empty else 1) * 1.18])
         fig2.update_yaxes(showgrid=False, automargin=True)
         st.plotly_chart(fig2, width="stretch", config={"displayModeBar": False})
 
@@ -174,13 +182,17 @@ def render_overview(client, open_requirement):
         _html(f'<div class="cc-card">{"".join(rows_html)}</div>')
 
     _html('<div class="cc-chart-title" style="margin-top:22px">Top priorities by vehicle</div>'
-          '<div class="cc-chart-sub">Highest server score per line. Select one to review its evidence.</div>')
+          '<div class="cc-chart-sub">Highest server scores per line, within each scoring policy. '
+          'Select one to review its evidence.</div>')
     cols = st.columns(len(vehicles) or 1, gap="medium")
     for col, v in zip(cols, vehicles):
         with col:
-            top = df[df.vehicle == v].sort_values("priority", ascending=False).head(5)
             _html(f'<div class="cc-vehicle"><span class="cc-swatch" style="background:{vcolor[v]}"></span>'
                   f'{c.e(v)}</div>')
-            for _, r in top.iterrows():
-                st.button(f"{r.priority:.1f}   {r.title}", key=f"top:{r.id}", width="stretch",
-                          on_click=open_requirement, args=(r.id,), help=f"{r.id} · {r.level} evidence · {r.status}")
+            for policy, portfolio in df[df.vehicle == v].groupby("policy", sort=False):
+                _html(c.pill(policy, "neutral"))
+                for _, r in portfolio.sort_values("priority", ascending=False).head(5).iterrows():
+                    value = f"{r.priority:.1f}" if pd.notna(r.priority) else "—"
+                    st.button(f"{value}   {r.title}", key=f"top:{r.id}", width="stretch",
+                               on_click=open_requirement, args=(r.id,),
+                               help=f"{r.id} · {policy} · {r.level} evidence · {r.status}")

@@ -363,6 +363,9 @@ class FixtureClient:
         r["rank"] = rank.get(rid)
         return normalize_detail(r)
 
+    def list_all_requirements(self, filters=None):
+        return self.list_requirements(filters, limit=max(1, len(self.reqs)))
+
     def get_evidence(self, rid):
         return copy.deepcopy(self._get(rid)["evidence"])
 
