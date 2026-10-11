@@ -4,7 +4,7 @@ Current corrective findings and verification are in [ROLE03_REAUDIT.md](ROLE03_R
 
 Role 3's governance implementation has been reviewed against [its assignment](../roles/03_BACKEND_AND_GOVERNANCE.md), [the implementation plan](../IMPLEMENTATION_PLAN.md), and [the challenge specification](../CHALLENGE_SPECIFICATION.md). The backend supports validated drafts, guarded human decisions, immutable revisions, deterministic scoring, audited review applications, complete exports and reconstructable approved freezes. The acceptance matrix and corrective findings are in [BACKEND_REVIEW.md](BACKEND_REVIEW.md).
 
-**Role 1 is integrated by default.** The backend now uses the actual imported graph through `GraphSourceProvider`, `Role1EvidenceResolver`, and `Role1ImportAdapter`. Source browsing, scoped retrieval/counts, sourced 2030 scoring, transactional import/audit, draft persistence, PM decisions, freeze/export and regeneration use real records. Role 2 generation/review and Role 4 UI are the subsequent integration steps.
+**Roles 1 and 2 are integrated by default.** The backend uses the actual imported graph through `GraphSourceProvider`, `Role1EvidenceResolver`, and `Role1ImportAdapter`, and instantiates the real `Role2Engine` for extraction, drafting and contextual review. Source browsing, scoped retrieval/counts, sourced 2030 scoring, transactional import/audit, draft persistence, PM decisions, freeze/export and regeneration use real records. See [ROLE2_INTEGRATION.md](ROLE2_INTEGRATION.md) for the bounded real-model verification. Role 4 UI is the subsequent integration step.
 
 ## Entry points and contracts
 

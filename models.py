@@ -201,6 +201,10 @@ class RequirementDraft(StrictContract):
     uncertainties: list[dict] = Field(default_factory=list)
     factor_proposals: dict = Field(default_factory=dict)
     has_conflict: bool = Field(default=False, strict=True)
+    jtbd: str = ""
+    claims: list[dict] = Field(default_factory=list)
+    alternatives: list[str] = Field(default_factory=list)
+    intelligence_draft: dict = Field(default_factory=dict)
 
     @field_validator("source_scope", "target_scope")
     @classmethod
@@ -449,6 +453,7 @@ class ReviewEngineResult(StrictContract):
 class AnalysisEngineResult(StrictContract):
     """Optional generation metadata envelope; drafts validate independently."""
     drafts: list[dict]
+    failures: list[str] = Field(default_factory=list)
     model_metadata: dict = Field(default_factory=dict)
     prompt_metadata: dict = Field(default_factory=dict)
 

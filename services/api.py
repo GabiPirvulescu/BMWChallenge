@@ -96,6 +96,10 @@ def create_app(repository=None, evidence_provider=None, engine=None, source_prov
                 if import_service is None:
                     import_service = Role1ImportAdapter(repo.driver, database=repo.database)
                 app.state.service = GovernanceService(repo, evidence_provider, audit_failure)
+                if engine is None and factory is None:
+                    from services.intelligence_backend import Role2Engine
+                    engine = Role2Engine(repo, app.state.source_provider,
+                        preview=lambda rid, revision, patch: change_preview(state(), get(rid), patch, revision))
             # Persist restart recovery rather than advertise interrupted work as running.
             def recover(state):
                 for run in state["runs"].values():
@@ -659,6 +663,7 @@ def create_app(repository=None, evidence_provider=None, engine=None, source_prov
                 result = AnalysisEngineResult.model_validate(dict(drafts, drafts=[])).model_dump()
                 json.dumps(result, allow_nan=False)
                 drafts = envelope_drafts
+                run["failures"].extend(result.get("failures", []))
                 metadata = {key: result[key] for key in metadata}
             run.update(copy.deepcopy(metadata))
             limit = body.get("max_drafts", max_analysis_drafts)
@@ -733,9 +738,13 @@ def create_app(repository=None, evidence_provider=None, engine=None, source_prov
         # Scope and bounds are admitted by the API. Adapters may inspect them,
         # but cannot rewrite the request used for later governance checks.
         body = copy.deepcopy(body)
-        if "progress_callback" in inspect.signature(method).parameters:
-            return method(body, progress_callback=progress_callback)
-        return method(body)
+        parameters = inspect.signature(method).parameters
+        arguments = {}
+        if "progress_callback" in parameters:
+            arguments["progress_callback"] = progress_callback
+        if "run_id" in parameters:
+            arguments["run_id"] = run["id"]
+        return method(body, **arguments)
 
     def execute_import(run, body):
         try:

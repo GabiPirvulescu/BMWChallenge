@@ -125,6 +125,36 @@ class Role1EvidenceResolver:
             if stored.get("revision") != finding["revision"]:
                 raise DomainError(409, "Signal revision changed; refresh the draft")
             signal_snapshots.append(stored)
+            signal_payload = stored.get("payload", {})
+            for span in signal_payload.get("evidence", []):
+                if not isinstance(span, dict) or "feedback_id" not in span or "source" not in span:
+                    raise DomainError(422, "Stored signal contains malformed issue membership")
+                source = span["source"]
+                comment = get("feedback", span["feedback_id"])
+                row = get("record", source["id"])
+                start, end = span.get("start"), span.get("end")
+                if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(comment["original_text"])
+                        or comment["original_text"][start:end] != span.get("text")
+                        or row.get("feedback_comment_id") != comment["id"]
+                        or comment["source_file_id"] != source["source_file_id"]
+                        or comment["source_version"] != source["source_version"]
+                        or comment["source_file_id"] not in active_ids):
+                    raise DomainError(422, "Signal membership does not resolve to the exact active feedback span")
+                if (comment.get("model") not in draft["source_scope"]["derivatives"]
+                        or comment.get("region") not in draft["source_scope"]["regions"]
+                        or comment.get("powertrain") not in draft["source_scope"]["powertrains"]):
+                    raise DomainError(422, "Stored issue membership is outside the draft source scope")
+                relation = {"supports": "supports", "opposes": "contradicts", "context": "context"}.get(span.get("polarity"))
+                if relation is None:
+                    raise DomainError(422, "Stored issue membership has invalid polarity")
+                reference = {"source_id": source["source_file_id"], "record_id": source["id"], "source_version": source["source_version"],
+                    "locator": row["locator"], "claim_key": span["id"], "relation": relation, "validation_state": "verified"}
+                pin(reference, row)
+                selected = selected_comments.setdefault(comment["id"], {"comment": comment, "relations": set(), "references": []})
+                selected["relations"].add(relation)
+                if reference not in selected["references"]:
+                    selected["references"].append(reference)
+        support = {identity: value for identity, value in selected_comments.items() if "supports" in value["relations"]}
 
         cohort_rows = sources._read("""
             MATCH (fb:CustomerFeedback)
