@@ -1,3 +1,4 @@
+# Keep the Neo4j service identical in docker-compose.yml so API startup reuses it.
 name: bmwchallenge-data
 
 services:
@@ -24,4 +25,5 @@ services:
       start_period: 20s
 
 volumes:
+  # Shared with the application Compose file: bmwchallenge-data_neo4j_data.
   neo4j_data:

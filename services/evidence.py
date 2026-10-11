@@ -207,14 +207,15 @@ def _bounded_limit(limit: int, maximum: int = 100) -> int:
 class Neo4jEvidenceProvider:
     """Read-only repository adapter; accepts a shared Neo4j driver."""
 
-    def __init__(self, driver: Any):
+    def __init__(self, driver: Any, database: str | None = None):
         if driver is None:
             raise ValueError("A configured Neo4j driver is required")
         self.driver = driver
+        self.database = database
 
     def _read(self, query: str, **params: Any) -> list[dict[str, Any]]:
         try:
-            with self.driver.session() as session:
+            with self.driver.session(**({"database": self.database} if self.database is not None else {})) as session:
                 result = session.execute_read(lambda tx: list(tx.run(query, **params)))
             return [record.data() if hasattr(record, "data") else dict(record) for record in result]
         except Exception as exc:

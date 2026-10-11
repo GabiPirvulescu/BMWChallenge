@@ -21,8 +21,11 @@ This file and the template are the integration contract. Root `config.py` now im
 | `NEO4J_URI` | `bolt://localhost:7687` | Backend/data graph connection |
 | `NEO4J_USER` | `neo4j` | Graph authentication; shared with Compose initialization |
 | `NEO4J_PASSWORD` | `bmwpassword` | Existing local development password; shared with Compose |
+| `NEO4J_DATABASE` | `neo4j` | Evidence import/retrieval and backend persistence database |
 | `API_HOST` | `0.0.0.0` | Backend listen address, not a UI destination |
 | `API_PORT` | `8000` | Backend listen/published port |
+| `API_PREFIX` | `/api` | Backend contract route prefix |
+| `BACKEND_ADAPTER_FACTORY` | Empty | Optional trusted Role 2/custom adapter factory; real Role 1 adapters are built in |
 | `API_BASE_URL` | `http://localhost:${API_PORT}` | Frontend API origin; dotenv resolves the port reference |
 | `STREAMLIT_SERVER_ADDRESS` | `0.0.0.0` | Streamlit listen address |
 | `STREAMLIT_SERVER_PORT` | `8501` | Streamlit listen/published port |
