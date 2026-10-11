@@ -40,6 +40,10 @@ If it's not `agentic` then I DON'T want it!💅
 
 [🎯 The assignment](CHALLENGE_SPECIFICATION.md) · [🗺️ The optimism](IMPLEMENTATION_PLAN.md) · [⚙️ The `.env` lore](CONFIGURATION.md)
 
+Data setup: [pipeline/README_DATA.md](pipeline/README_DATA.md). Backend startup:
+[docs/BACKEND_RUNTIME.md](docs/BACKEND_RUNTIME.md). AI integration:
+[docs/ROLE2_INTEGRATION.md](docs/ROLE2_INTEGRATION.md).
+
 ---
 
 <div align="center">

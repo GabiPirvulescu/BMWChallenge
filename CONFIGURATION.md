@@ -13,7 +13,7 @@ This file and the template are the integration contract. Root `config.py` now im
 | Variable | Template default | Consumer / purpose |
 | :--- | :--- | :--- |
 | `OPENAI_API_KEY` | Empty; fill privately | Role 2's backend model adapter; required for live calls |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model adapter; selected model recorded in run provenance |
+| `OPENAI_MODEL` | `gpt-5.4` | Model adapter; selected model recorded in run provenance |
 | `BMW_RAW_DATA_DIR` | `./BMW-Data` | Role 1 raw XLSX/PDF conversion |
 | `BMW_DATA_DIR` | `./var/processed` | Converter output and existing processed-input loader |
 | `BMW_OUTPUT_DIR` | `./var/exports` | Role 3 sample/audit/freeze exports; Role 5 private delivery artifacts |
@@ -21,13 +21,22 @@ This file and the template are the integration contract. Root `config.py` now im
 | `NEO4J_URI` | `bolt://localhost:7687` | Backend/data graph connection |
 | `NEO4J_USER` | `neo4j` | Graph authentication; shared with Compose initialization |
 | `NEO4J_PASSWORD` | `bmwpassword` | Existing local development password; shared with Compose |
+| `NEO4J_DATABASE` | `neo4j` | Evidence import/retrieval and backend persistence database |
 | `API_HOST` | `0.0.0.0` | Backend listen address, not a UI destination |
 | `API_PORT` | `8000` | Backend listen/published port |
+| `API_PREFIX` | `/api` | Backend contract route prefix |
+| `BACKEND_ADAPTER_FACTORY` | Empty | Optional trusted Role 2/custom adapter factory; real Role 1 adapters are built in |
 | `API_BASE_URL` | `http://localhost:${API_PORT}` | Frontend API origin; dotenv resolves the port reference |
 | `STREAMLIT_SERVER_ADDRESS` | `0.0.0.0` | Streamlit listen address |
 | `STREAMLIT_SERVER_PORT` | `8501` | Streamlit listen/published port |
 
 Weights, evidence thresholds, forecast/reference policy, allowed statuses and tool budgets belong to versioned application policy, not duplicate per-developer environment knobs. Actual source values are read from imported data.
+
+Role 2 verified `gpt-5.4` with low reasoning on the standalone synthetic live suite. GPT-5 reasoning
+and function-tool turns use OpenAI's Responses API with `store=False`; encrypted tool-turn continuity
+is kept only in adapter memory. Older/classic OpenAI models retain the Chat Completions adapter.
+The default replaces the earlier `gpt-4o-mini` baseline after output-quality evaluation. Model/API
+policy is recorded with results/cache keys; setting `OPENAI_MODEL` still overrides the selection.
 
 ## Local Setup
 

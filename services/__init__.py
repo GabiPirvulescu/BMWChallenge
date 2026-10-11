@@ -1,1 +1,1 @@
-"""Reusable data and evidence services for the BMW requirements engine."""
+"""Evidence, AI and authoritative governance services for BMW ConceptCraft."""

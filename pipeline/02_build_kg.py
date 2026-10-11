@@ -164,7 +164,7 @@ def main() -> int:
     driver = GraphDatabase.driver(uri, auth=(user, password))
     try:
         driver.verify_connectivity()
-        with driver.session() as session:
+        with driver.session(database=settings.neo4j_database) as session:
             summary = build_evidence_relationships(session)
     except Exception as exc:
         print(f"Evidence relationship build failed: {type(exc).__name__}: {exc}", file=sys.stderr)
