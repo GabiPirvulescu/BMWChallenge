@@ -108,7 +108,7 @@ def main() -> int:
     try:
         from neo4j import GraphDatabase
     except ImportError:
-        print("Neo4j driver is missing; install pipeline/requirements-data.txt")
+        print("Neo4j driver is missing; install requirements.txt")
         return 2
     driver = GraphDatabase.driver(uri, auth=(user, password))
     try:

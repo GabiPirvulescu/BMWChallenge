@@ -940,7 +940,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         from neo4j import GraphDatabase
     except ImportError:
-        print("Neo4j import requires neo4j driver; install pipeline/requirements-data.txt", file=sys.stderr)
+        print("Neo4j import requires neo4j driver; install requirements.txt", file=sys.stderr)
         return 2
     driver = GraphDatabase.driver(uri, auth=(user, password))
     try:

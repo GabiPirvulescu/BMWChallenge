@@ -193,4 +193,4 @@ The following four expected deliverables are reproduced from the BMW wording sup
 
 - [ ] **Pitch Presentation Deck (3–5 min)**: Compelling narrative demonstrating real-world value, data grounding, and Trustworthy AI principles.
 
-See `IMPLEMENTATION_PLAN.md` for the concrete prototype features, artifact formats, implementation responsibilities, and acceptance criteria mapped to these deliverables.
+See [README.md](README.md) for the implemented workflow, API, setup and export instructions. The remaining frontend and presentation assignments are under `roles/`.

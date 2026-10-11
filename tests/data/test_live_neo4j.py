@@ -35,7 +35,7 @@ class LiveNeo4jTests(unittest.TestCase):
         try:
             from neo4j import GraphDatabase
         except ImportError as exc:
-            raise RuntimeError("Install the Neo4j Python driver from pipeline/requirements-data.txt") from exc
+            raise RuntimeError("Install the Neo4j Python driver from requirements.txt") from exc
 
         if os.environ.get("BMW_NEO4J_TEST_AUTH_DISABLED") == "1":
             auth = None

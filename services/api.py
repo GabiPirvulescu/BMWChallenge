@@ -6,7 +6,6 @@ independent test instance; production never silently falls back to memory.
 import copy
 import importlib
 import json
-import os
 import uuid
 import threading
 import inspect
